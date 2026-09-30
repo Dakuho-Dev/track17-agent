@@ -1,0 +1,43 @@
+# Cut a release the 24/7 box can update itself into.
+#
+# Push a tag, get an installer. The tag is the only gate: electron-builder
+# publishes straight to a real (not draft) GitHub Release, because a draft is
+# invisible to electron-updater and the whole point is that nobody has to log
+# into the box to finish the job.
+#
+#   npm version patch   # bumps package.json and makes the v1.0.1 tag
+#   git push --follow-tags
+#
+# Windows-only on purpose: the agent drives a Chromium window against Etsy and
+# 17track and is installed on one Windows machine.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  # electron-builder needs this to create the release and upload to it.
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build and publish the installer
+        run: npm run release
+        env:
+          # The workflow's own token is enough — the repo it publishes to is the
+          # repo it runs in, so no personal access token has to be stored.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,50 @@
+{
+  "name": "track17-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local agent: reads parcel status off 17track.net and the seller's own Etsy order pages, and hands the result back to WrL",
+  "main": "src/main.js",
+  "author": "Dakuho",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --publish never",
+    "release": "electron-builder --win nsis --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "build": {
+    "appId": "vn.dakuho.track17agent",
+    "productName": "Track17 Agent",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Dakuho-Dev",
+        "repo": "track17-agent",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Track17 Agent",
+      "artifactName": "Track17-Agent-Setup-${version}.${ext}"
+    }
+  }
+}

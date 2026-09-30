@@ -1,0 +1,6 @@
+node_modules/
+dist/
+# Local notes and anything holding a token — the WrL token belongs in the app's
+# own config.json under %APPDATA%, never in the repo.
+*.local.txt
+agent.log

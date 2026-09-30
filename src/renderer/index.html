@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <title>Track17 Agent</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --line: #e2e5ea;
+        --text: #1b1f24;
+        --muted: #6b7280;
+        --accent: #1f6feb;
+        --ok: #1a7f37;
+        --warn: #9a6700;
+        --log-bg: #11151a;
+        --log-text: #d7dde5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #15181d;
+          --panel: #1d2128;
+          --line: #2c313a;
+          --text: #e6e9ee;
+          --muted: #9aa4b2;
+          --log-bg: #0c0f13;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px;
+        font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      h1 { font-size: 17px; margin: 0 0 4px; }
+      p.lead { margin: 0 0 18px; color: var(--muted); }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 14px;
+      }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; }
+      label { display: block; margin-bottom: 10px; }
+      label span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      input[type="text"], input[type="password"], input[type="number"] {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+      }
+      .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+      .check { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; }
+      .check input { margin-top: 3px; }
+      .check div { font-size: 13px; }
+      .check small { display: block; color: var(--muted); }
+      .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+      button {
+        padding: 8px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:disabled { opacity: .5; cursor: default; }
+      .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; text-align: center; }
+      .stats.six { grid-template-columns: repeat(6, 1fr); }
+      select {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+      }
+      .stats div strong { display: block; font-size: 20px; }
+      .stats div span { font-size: 11px; color: var(--muted); }
+      #log {
+        background: var(--log-bg);
+        color: var(--log-text);
+        border-radius: 8px;
+        padding: 12px;
+        height: 190px;
+        overflow-y: auto;
+        font: 12px/1.6 Consolas, "Cascadia Mono", monospace;
+        white-space: pre-wrap;
+      }
+      #status { font-size: 12px; color: var(--muted); margin-left: auto; align-self: center; }
+      #status.on { color: var(--ok); }
+    </style>
+  </head>
+  <body>
+    <h1>Track17 Agent</h1>
+    <p class="lead">
+      Tra trạng thái vận chuyển rồi gửi về WrL để đẩy sang CMS, bằng hai làn:
+      <strong>17track.net</strong> cho các hãng không phải USPS, và
+      <strong>trang đơn Etsy</strong> cho phần còn lại — USPS đã chặn hết đường tra
+      của bên thứ ba, nhưng Etsy thì đã tự tra sẵn rồi.
+    </p>
+
+    <section>
+      <h2>Kết nối WrL</h2>
+      <label>
+        <span>Địa chỉ WrL</span>
+        <input type="text" id="baseUrl" placeholder="https://wearelucky.io.vn" />
+      </label>
+      <label>
+        <span>Token (MANUAL_TRACKING_TOKEN trên WrL)</span>
+        <input type="password" id="token" placeholder="dán token vào đây" />
+      </label>
+      <div class="buttons">
+        <button id="save">Lưu</button>
+        <button id="test">Kiểm tra kết nối</button>
+        <button id="open">Mở cửa sổ 17track</button>
+        <button id="etsy-login">Đăng nhập Etsy</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Cách chạy</h2>
+      <label>
+        <span>Làn nào chạy</span>
+        <select id="lanes">
+          <option value="both">Cả hai — 17track trước, rồi đọc Etsy</option>
+          <option value="track17">Chỉ 17track (hãng không phải USPS)</option>
+          <option value="etsy">Chỉ đọc trang đơn Etsy (gồm USPS)</option>
+        </select>
+      </label>
+      <div class="row">
+        <label>
+          <span>Số mã mỗi lượt (tối đa 40)</span>
+          <input type="number" id="batchSize" min="1" max="40" />
+        </label>
+        <label>
+          <span>Nghỉ giữa hai lượt (giây)</span>
+          <input type="number" id="batchDelaySeconds" min="5" max="600" />
+        </label>
+        <label>
+          <span>Nghỉ khi hết hàng đợi (phút)</span>
+          <input type="number" id="idleMinutes" min="1" max="1440" />
+        </label>
+      </div>
+      <div class="row">
+        <label>
+          <span>Số trang đơn đọc mỗi shop</span>
+          <input type="number" id="etsyPagesPerShop" min="1" max="50" />
+        </label>
+        <label>
+          <span>Nghỉ giữa hai trang Etsy (giây)</span>
+          <input type="number" id="etsyPageDelaySeconds" min="2" max="120" />
+        </label>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="autoRun" />
+        <div>
+          Chạy liên tục
+          <small>Bỏ chọn thì mỗi lần bấm Bắt đầu chỉ tra một lượt 40 mã.</small>
+        </div>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="showBrowser" />
+        <div>
+          Hiện cửa sổ 17track
+          <small>Tắt đi thì cửa sổ vẫn chạy nhưng ẩn, đỡ vướng màn hình.</small>
+        </div>
+      </div>
+      <div class="buttons">
+        <button class="primary" id="start">Bắt đầu</button>
+        <button id="stop" disabled>Dừng</button>
+        <span id="status">Đang nghỉ</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Kết quả phiên này</h2>
+      <div class="stats six">
+        <div><strong id="s-batches">0</strong><span>lượt tra</span></div>
+        <div><strong id="s-looked">0</strong><span>mã đã tra</span></div>
+        <div><strong id="s-etsy">0</strong><span>đơn đọc từ Etsy</span></div>
+        <div><strong id="s-updated">0</strong><span>đơn đổi trạng thái</span></div>
+        <div><strong id="s-delivered">0</strong><span>đã giao</span></div>
+        <div><strong id="s-errors">0</strong><span>lỗi</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Nhật ký</h2>
+      <div id="log"></div>
+    </section>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
