@@ -14,7 +14,8 @@ contextBridge.exposeInMainWorld('agent', {
   stop: () => ipcRenderer.invoke('agent:stop'),
   test: () => ipcRenderer.invoke('agent:test'),
   showBrowser: () => ipcRenderer.invoke('browser:show'),
-  etsyLogin: () => ipcRenderer.invoke('etsy:login'),
+  hmaMapping: () => ipcRenderer.invoke('hma:mapping'),
+  hmaOpen: () => ipcRenderer.invoke('hma:open'),
   onLog: (handler) => ipcRenderer.on('agent:log', (_event, line) => handler(line)),
   onState: (handler) => ipcRenderer.on('agent:state', (_event, state) => handler(state)),
 });

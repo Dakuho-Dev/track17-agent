@@ -17,24 +17,60 @@ Làn 17track làm đúng việc một người sẽ làm: lấy danh sách mã c
 bấm tra, đọc kết quả, gửi về.
 
 Làn Etsy tồn tại vì USPS đã chặn hết đường tra của bên thứ ba (xem mục dưới). Nhưng
-Etsy thì **đã tự tra hãng vận chuyển rồi**, và quan trọng hơn: nó cho lọc theo trạng
-thái ngay trên URL —
+Etsy thì **đã tự tra hãng vận chuyển rồi** — chữ "Pre-transit" trên trang đơn chính
+là kết quả đó.
+
+Danh sách đơn trên trang được vẽ từ một lời gọi JSON nội bộ của chính Etsy:
 
 ```
-etsy.com/your/orders/sold/all?completed_status=pre_transit
+/api/v3/ajax/bespoke/shop/<shopId>/mission-control/orders/data
+    ?filters[completed_status]=pre_transit&limit=50&offset=0 …
 ```
 
-Nên **trang chính là bộ lọc**: mọi đơn hiện ra đều chắc chắn ở đúng trạng thái đó, và
-app chỉ cần nhặt mã đơn. Không phải đọc nhãn trong từng dòng, không phụ thuộc tên class
-— Etsy đổi giao diện thì `#` + chữ số vẫn là mã đơn.
+Mỗi đơn trong đó mang sẵn nhãn Etsy ở
+`fulfillment.status.physical_status.shipping_status.tracking_status.summary`
+("Pre-transit", "In transit", "Out for delivery", "Delivered"). App gọi đúng lời gọi
+đó **từ bên trong trang Etsy của profile**, nên nó đi ra với cookie, vân tay và proxy
+của chính profile, y như trang tự gọi. App gửi về WrL mã đơn + chữ gốc của Etsy
+(`statusText`), WrL tự quy đổi. Không tên người mua hay địa chỉ nào ra khỏi trình duyệt.
 
-App đi qua ba trang cho mỗi shop: `pre_transit`, `in_transit`, `delivered`. Hai trạng
-thái đầu là phần đang chạy, cần theo dõi liên tục. Trang `delivered` cũng phải quét,
+Đã thử và **không** dùng được (đo trên shop thật 05/10/2026):
+
+- Mở thẳng `/your/orders/sold/all?completed_status=pre_transit`: Etsy đưa về tab xem
+  lần trước và bỏ bộ lọc, nên ba "trang trạng thái" ra cùng một trang.
+- Nhặt `#` + chữ số trên trang: kể cả khi lọc đúng cũng chỉ thấy 20 dòng đang vẽ.
+
+App đọc ba danh sách cho mỗi shop: `pre_transit`, `in_transit`, `delivered`, mỗi lượt
+50 đơn (xin hơn 50 thì Etsy lặng lẽ trả 20). Hai trạng thái đầu là phần đang chạy, chỉ
+vài chục đơn mỗi shop nên đọc hết. `delivered` cũng phải đọc,
 nếu không đơn giao xong sẽ mắc kẹt ở "Đang vận chuyển" mãi mãi — vì đơn chỉ đơn giản
-biến mất khỏi hai danh sách kia chứ không báo gì.
+biến mất khỏi hai danh sách kia chứ không báo gì. Nhưng `delivered` rất lớn (một shop
+có hơn 10.000 đơn), nên chỉ đọc đơn gửi trong 90 ngày gần nhất, mới nhất trước.
 
-Mỗi shop một phiên đăng nhập riêng. **App không bao giờ tự gõ mật khẩu** — Sếp tự
-đăng nhập một lần cho mỗi shop, sau đó phiên được giữ lại.
+Chạy thử trên Macievision: 346 đơn trong 36 giây — 47 Pre-transit, 44 In transit,
+21 Out for delivery, 234 Delivered.
+
+Mỗi shop được đọc **bên trong profile Hidemyacc của chính shop đó** — đúng profile
+sạch (vân tay, proxy, phiên Etsy riêng) mà team vẫn dùng. App không giữ phiên Etsy
+nào của riêng nó và **không bao giờ tự gõ mật khẩu**.
+
+### Vì sao agent phải tự mở profile qua Hidemyacc
+
+Đã đo trên máy thật (05/10/2026): profile mở tay từ cửa sổ Hidemyacc chạy Chrome
+**không có cổng DevTools** (`--remote-debugging-port`), nên không chương trình nào
+bên ngoài điều khiển được. Chỉ profile mở qua API cục bộ
+`POST http://127.0.0.1:2268/profiles/start/:id` mới có cổng, và phản hồi trả về
+`wsUrl`. Gọi `start` lại cho profile đang chạy (do API mở) thì vô hại — trả lại
+đúng `wsUrl` cũ — nên agent cứ hỏi lại mỗi lượt, không phải nhớ cổng.
+
+Mỗi lượt cho một shop: `start` profile → bám vào qua DevTools → mở **một tab
+riêng** → đọc ba danh sách trạng thái → đóng tab đó → buông ra. Các tab Sếp đang mở
+trong profile không bị đụng tới. Agent không bao giờ tự đóng trình duyệt; nếu bật
+"Đóng profile sau khi đọc xong" thì nó nhờ Hidemyacc `stop` — và chỉ với profile
+do chính agent mở.
+
+API này chỉ chạy khi **app Hidemyacc đang mở và đã đăng nhập**, và chỉ có từ gói
+Team trở lên (không thì Hidemyacc trả 402).
 
 App **không** nói chuyện trực tiếp với CMS. Mọi thứ đi qua WrL, nên dữ liệu vẫn qua đúng
 một đường kiểm tra và một hàng đợi.
@@ -49,8 +85,12 @@ tại (không cần quyền admin), tạo lối tắt ở Desktop và Start Menu
 Sau khi cài, làm ba việc một lần duy nhất:
 
 1. Điền **Địa chỉ WrL** và **Token**, bấm **Kiểm tra kết nối**.
-2. Bấm **Đăng nhập Etsy** rồi đăng nhập từng cửa sổ shop. App không bao giờ tự
-   điền mật khẩu — phiên đăng nhập được giữ lại nên chỉ phải làm một lần cho mỗi shop.
+2. Mở app Hidemyacc (đăng nhập sẵn). Trong agent, mục **Profile Hidemyacc** bấm
+   **Tải danh sách**, chọn profile cho từng shop rồi **Lưu**. Shop nào chỉ có một
+   profile mang tên shop thì agent tự đoán sẵn; shop có nhiều profile (Backup,
+   Phương, Lam…) thì Sếp phải chọn — đọc nhầm profile là âm thầm ra 0 đơn.
+   Sau đó bấm **Mở profile các shop**. Profile nào chưa đăng nhập Etsy thì Sếp
+   đăng nhập trong chính profile đó, một lần.
 3. Bật **Chạy liên tục**. Ô này cũng là công tắc "khởi động cùng Windows": bật thì
    máy bật lên là agent tự chạy lại, tắt thì không.
 
@@ -100,14 +140,17 @@ File nằm trong `dist/`.
 | Token | Đúng bằng `MANUAL_TRACKING_TOKEN` đặt trên Vercel của WrL |
 | Làn nào chạy | Cả hai (17track trước rồi Etsy), hoặc chỉ một làn |
 | Số mã mỗi lượt | Tối đa 40 — giới hạn của ô tìm kiếm 17track |
-| Số trang đơn đọc mỗi shop | Mặc định 5 trang **cho mỗi trạng thái**, tính từ trang mới nhất |
+| Số lượt đọc mỗi trạng thái | Mặc định 5 lượt × 50 đơn **cho mỗi trạng thái**. Thiếu thì log báo còn bao nhiêu đơn chưa đọc |
 | Nghỉ giữa hai lượt | Mặc định 25 giây |
 | Chạy liên tục | Bật thì app tự làm hết hàng đợi rồi nghỉ theo chu kỳ, **và tự chạy lại mỗi lần Windows khởi động**; tắt thì mỗi lần bấm chỉ tra một lượt |
 | Hiện cửa sổ 17track | Tắt đi thì cửa sổ vẫn chạy nhưng ẩn |
+| Địa chỉ API Hidemyacc | Mặc định `http://127.0.0.1:2268` |
+| Profile cho từng shop | Lưu thành `hmaProfiles` = `{ tên shop: id profile }` |
+| Đóng profile sau khi đọc xong | Mặc định tắt. Chỉ đóng profile do agent tự mở |
 
 Bấm **Kiểm tra kết nối** để xem token đúng chưa và mỗi làn còn bao nhiêu việc.
-Bấm **Đăng nhập Etsy** để app mở sẵn một cửa sổ cho từng shop — Sếp đăng nhập từng
-cái một, chỉ cần làm một lần.
+Bấm **Mở profile các shop** để agent mở profile Hidemyacc của mọi shop qua API —
+**đừng mở tay trong Hidemyacc**, profile mở tay agent không điều khiển được.
 
 ## Luồng chạy
 
@@ -125,10 +168,9 @@ Làn Etsy (chạy sau khi hàng đợi 17track đã hết):
 ```
 WrL  GET /api/tracking/etsy/plan
         → shop nào còn vận đơn chờ, mỗi shop bao nhiêu
-App  với mỗi shop, lần lượt mở ba trang đã lọc sẵn:
-        ?completed_status=pre_transit   → mọi mã đơn ở đây = PRE_TRANSIT
-        ?completed_status=in_transit    → = IN_TRANSIT
-        ?completed_status=delivered     → = DELIVERED
+App  với mỗi shop: Hidemyacc start profile → tab riêng ở /your/orders/sold
+        → gọi orders/data cho pre_transit, in_transit, delivered (90 ngày)
+        → mỗi đơn: { orderId, statusText: "Pre-transit" | "In transit" | … }
 WrL  POST /api/tracking/etsy/results     → khớp theo số đơn, ghi trạng thái
 ```
 
@@ -191,9 +233,8 @@ làn USPS quay về máy chủ chạy 24/7 và làn Etsy thành dự phòng.
 - Việc tự động thao tác trên 17track.net và trên trang seller của Etsy nằm ngoài điều
   khoản sử dụng của hai bên. Dùng ở mức vừa phải — giữ khoảng nghỉ mặc định, đừng đọc
   quá nhiều trang mỗi lượt.
-- Làn Etsy chỉ đọc các trang đơn gần đây (mặc định 5 trang mỗi shop). Đơn cũ hơn thế thì
-  phải tăng số trang lên.
-- Làn Etsy không dò tên class nào cả — trạng thái đến từ URL, mã đơn đến từ mẫu
-  `#` + tối thiểu 6 chữ số. Nếu Etsy đổi trang tới mức không còn mã đơn nào, nhật ký
-  phân biệt rõ hai trường hợp: trang báo rỗng (bình thường) và trang không báo gì mà
-  cũng không có mã đơn (đáng ngờ, kèm số ký tự đọc được).
+- Làn Etsy đọc tối đa 5 × 50 đơn cho mỗi trạng thái (chỉnh được). `delivered` chỉ
+  tính đơn gửi trong 90 ngày.
+- Làn Etsy dựa vào lời gọi JSON nội bộ của Etsy, không phải API công khai — Etsy đổi
+  là phải sửa. Khi đó nhật ký ghi rõ `đọc lỗi ở vị trí … — HTTP …` hoặc
+  `thiếu orders_search.orders`.

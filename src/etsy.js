@@ -1,9 +1,10 @@
 'use strict';
 
-const { BrowserWindow } = require('electron');
+const puppeteer = require('puppeteer-core');
+const { HidemyaccClient } = require('./hidemyacc');
 
 /**
- * Reads transit status off a seller's own Etsy order pages.
+ * Reads transit status off a seller's own Etsy order list.
  *
  * This is the lane that covers USPS, and in practice everything else too. Every
  * free third-party route for a USPS number is closed (17track's site answers
@@ -11,76 +12,57 @@ const { BrowserWindow } = require('electron');
  * tools.usps.com sits behind Akamai Bot Manager, which hands an automated
  * browser a blank page). Etsy, though, has already resolved the carrier.
  *
- * The important part is how: Etsy's order list takes the shipping status as a
- * URL parameter —
+ * How it reads, measured on a live shop on 2026-10-05:
  *
- *     /your/orders/sold/all?completed_status=pre_transit
+ * The order list is drawn from one JSON call the page makes for itself,
  *
- * so the page itself is the filter. Every order listed is in that status, and
- * the agent only has to collect order numbers. Nothing depends on reading a
- * label out of a row, which is what made the earlier version fragile: Etsy
- * rewrites its markup often, but "#" followed by digits is the order number and
- * always will be.
+ *     /api/v3/ajax/bespoke/shop/<shopId>/mission-control/orders/data
+ *         ?filters[completed_status]=pre_transit&limit=50&offset=0 …
  *
- * Each shop gets its own browser session, because each is a separate Etsy
- * login. Nothing is typed for the operator: they sign in themselves, once per
- * shop, and the session persists from then on.
+ * and every order in it carries Etsy's own label at
+ * fulfillment.status.physical_status.shipping_status.tracking_status.summary
+ * ("Pre-transit", "In transit", "Out for delivery", "Delivered"). The agent
+ * makes that same call from inside the shop's page, so it goes out with the
+ * profile's own cookies, fingerprint and proxy, exactly like the page's own.
+ *
+ * Two things that were tried first and do not work:
+ *
+ *   - Opening /your/orders/sold/all?completed_status=… directly. Etsy sends you
+ *     back to whichever tab was last viewed and drops the filter, so all three
+ *     "status pages" came back as the same page.
+ *   - Reading "#" + digits off the rendered page. Even when the filter holds,
+ *     that only sees the 20 rows drawn on screen.
+ *
+ * Each shop is read inside its own Hidemyacc profile — the clean Chrome profile
+ * with the shop's fingerprint, proxy and Etsy login that the team already uses.
+ * The agent keeps no Etsy logins of its own: it asks Hidemyacc's local API to
+ * start the profile, attaches over DevTools, reads in a tab of its own, closes
+ * that tab and lets go. See src/hidemyacc.js for why the profile has to be
+ * started through the API rather than by hand.
  */
 
-const ORDERS_URL = 'https://www.etsy.com/your/orders/sold/all';
+const ORDERS_URL = 'https://www.etsy.com/your/orders/sold';
+
+/** Etsy quietly falls back to 20 rows when asked for more than 50. */
+const PAGE_SIZE = 50;
 
 /**
- * Which status pages to walk, and what each one means in our vocabulary.
+ * Which status lists to walk.
  *
- * The two moving states are what the team watches, so they are polled every
- * round. `delivered` is walked as well — without it a parcel that arrives would
- * sit at IN_TRANSIT in the CMS for ever, because an order simply stops
- * appearing in the first two lists when it lands. Drop it from this array if
- * the extra page load per shop is ever not worth it.
+ * The two moving states are what the team watches, and they are short (tens
+ * of orders a shop), so they are read in full. `delivered` is read as well —
+ * without it a parcel that arrives would sit at IN_TRANSIT in the CMS for ever,
+ * because an order simply drops out of the first two lists when it lands. It
+ * is also huge (10,000+ orders on one shop), so it is cut to orders shipped in
+ * the last 90 days, newest first.
  */
-const STATUS_PAGES = [
-  { param: 'pre_transit', status: 'PRE_TRANSIT' },
-  { param: 'in_transit', status: 'IN_TRANSIT' },
-  { param: 'delivered', status: 'DELIVERED' },
+const STATUS_LISTS = [
+  { param: 'pre_transit', status: 'PRE_TRANSIT', completedDate: 'all', sortOrder: 'asc' },
+  { param: 'in_transit', status: 'IN_TRANSIT', completedDate: 'all', sortOrder: 'asc' },
+  { param: 'delivered', status: 'DELIVERED', completedDate: 'last_90_days', sortOrder: 'desc' },
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function statusUrl(param, page) {
-  const base = `${ORDERS_URL}?completed_status=${encodeURIComponent(param)}`;
-  return page > 1 ? `${base}&page=${page}` : base;
-}
-
-/**
- * Collect the order numbers on the page.
- *
- * Deliberately not selector-based. The page is already filtered to one status,
- * so there is nothing to interpret — an order number is "#" followed by at
- * least six digits, and the only other numbers on the page (prices, dates,
- * quantities) do not carry that prefix.
- */
-function scrapeScript() {
-  return `(() => {
-    const text = document.body.innerText || '';
-    const ids = [];
-    const seen = new Set();
-
-    for (const match of text.matchAll(/#(\\d{6,})\\b/g)) {
-      const id = match[1];
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
-
-    return {
-      ids,
-      // Reported so an empty page can be told apart from a page that did not
-      // render: Etsy says so in words when a filter matches nothing.
-      looksEmpty: /no orders|nothing to see|0 orders/i.test(text),
-      length: text.length,
-    };
-  })()`;
-}
 
 /** Is this page asking us to sign in? */
 function signInScript() {
@@ -88,16 +70,88 @@ function signInScript() {
     if (/\\/signin/.test(location.href)) return { signedIn: false, reason: 'signin-page' };
     const text = (document.body.innerText || '').slice(0, 400);
     if (/Sign in|Log in to continue/i.test(text)) return { signedIn: false, reason: 'signin-form' };
-    return { signedIn: true, sample: text.slice(0, 160) };
+    return { signedIn: true };
   })()`;
+}
+
+/**
+ * The shop's numeric id, which the orders call is keyed on.
+ *
+ * The order page embeds it in its own data. Reported as a list so a page that
+ * somehow names two shops is caught rather than read from the wrong one.
+ */
+function shopIdScript() {
+  return `(() => {
+    const html = document.documentElement.innerHTML;
+    return [...new Set([...html.matchAll(/"shop_id"\\s*:\\s*"?(\\d+)/g)].map((m) => m[1]))];
+  })()`;
+}
+
+/**
+ * One page of one status list, read in the shop's own page.
+ *
+ * Returns only what the agent needs — order number and Etsy's label — so no
+ * buyer name or address ever leaves the browser.
+ */
+async function fetchOrders(page, shopId, list, offset) {
+  return page.evaluate(
+    async ({ shopId, param, completedDate, sortOrder, offset, limit }) => {
+      const query = new URLSearchParams({
+        'filters[completed_status]': param,
+        'filters[completed_date]': completedDate,
+        'filters[order_state_id]': 'all',
+        limit: String(limit),
+        offset: String(offset),
+        sort_by: 'expected_ship_date',
+        sort_order: sortOrder,
+      });
+      const res = await fetch(`/api/v3/ajax/bespoke/shop/${shopId}/mission-control/orders/data?${query}`, {
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+      });
+      if (!res.ok) return { error: `HTTP ${res.status}` };
+
+      let body;
+      try {
+        body = await res.json();
+      } catch {
+        return { error: 'không phải JSON' };
+      }
+      const search = body && body.orders_search;
+      if (!search || !Array.isArray(search.orders)) return { error: 'thiếu orders_search.orders' };
+
+      return {
+        total: Number(search.total_count) || 0,
+        orders: search.orders.map((order) => {
+          const tracking =
+            order.fulfillment &&
+            order.fulfillment.status &&
+            order.fulfillment.status.physical_status &&
+            order.fulfillment.status.physical_status.shipping_status &&
+            order.fulfillment.status.physical_status.shipping_status.tracking_status;
+          return {
+            orderId: String(order.order_id),
+            summary: tracking && tracking.summary ? String(tracking.summary) : null,
+            canceled: Boolean(order.is_canceled),
+          };
+        }),
+      };
+    },
+    {
+      shopId,
+      param: list.param,
+      completedDate: list.completedDate,
+      sortOrder: list.sortOrder,
+      offset,
+      limit: PAGE_SIZE,
+    },
+  );
 }
 
 class EtsyReader {
   /** @param {(message: string) => void} log */
   constructor(log) {
     this.log = log;
-    /** One window per shop — each is a separate Etsy login. */
-    this.windows = new Map();
     /** Set while the operator has asked to stop; a shop walk can take minutes. */
     this.stopped = false;
   }
@@ -108,116 +162,132 @@ class EtsyReader {
   }
 
   /**
-   * Open (or reuse) the window for a shop.
+   * Start a shop's profile through Hidemyacc and attach to it.
    *
-   * The partition name is what keeps the logins apart, and `persist:` is what
-   * keeps them across restarts, so the operator signs in once per shop.
+   * Also reports whether the profile was already running, so one the agent
+   * opened itself can be closed again afterwards without touching one the
+   * operator opened.
    */
-  async open(shopName, { show = true } = {}) {
-    const existing = this.windows.get(shopName);
-    if (existing && !existing.isDestroyed()) {
-      if (show) existing.show();
-      return existing;
-    }
+  async attach(settings, profileId) {
+    const hma = new HidemyaccClient(settings);
+    const profile = (await hma.profiles()).find((candidate) => candidate.id === profileId);
+    if (!profile) throw new Error(`không còn profile ${profileId} trên Hidemyacc`);
 
-    const window = new BrowserWindow({
-      width: 1280,
-      height: 900,
-      show,
-      title: `Etsy — ${shopName}`,
-      webPreferences: {
-        partition: `persist:etsy-${encodeURIComponent(shopName)}`,
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-
-    window.on('closed', () => this.windows.delete(shopName));
-    this.windows.set(shopName, window);
-    await window.loadURL(statusUrl(STATUS_PAGES[0].param, 1));
-    return window;
-  }
-
-  closeAll() {
-    for (const window of this.windows.values()) {
-      if (!window.isDestroyed()) window.destroy();
-    }
-    this.windows.clear();
-  }
-
-  setVisible(show) {
-    for (const window of this.windows.values()) {
-      if (window.isDestroyed()) continue;
-      if (show) window.show();
-      else window.hide();
-    }
+    const { wsUrl } = await hma.start(profileId);
+    // defaultViewport null: leave the profile's own window size alone — an
+    // emulated viewport is one more thing that would differ from a person.
+    const browser = await puppeteer.connect({ browserWSEndpoint: wsUrl, defaultViewport: null });
+    return { browser, hma, profile, wasRunning: profile.status === 'running' };
   }
 
   /**
-   * Walk a shop's status pages and return one entry per order found.
+   * Start every given profile so each has a DevTools port, ready for a run.
    *
-   * Returns `{ needsLogin }` when the session has lapsed — the window is left
-   * open and in front so the operator can sign in, and the shop is picked up on
-   * the next round.
+   * This is the "open all my shops" button: the operator keeps the Hidemyacc
+   * app open and signed in, the agent opens the profiles through it.
    */
-  async readShop(shopName, { pages = 5, pageDelayMs = 8000 } = {}) {
-    const window = await this.open(shopName, { show: true });
-    const webContents = window.webContents;
+  async openProfiles(settings, entries) {
+    const hma = new HidemyaccClient(settings);
+    const opened = [];
+    const failed = [];
+    for (const { shopName, profileId } of entries) {
+      try {
+        await hma.start(profileId);
+        opened.push(shopName);
+      } catch (error) {
+        failed.push(`${shopName} (${error.message})`);
+      }
+    }
+    return { opened, failed };
+  }
 
-    // One entry per order. A number can only be in one status list at a time,
-    // but the lists are walked newest-first and a parcel can move between two
-    // reads, so the later page wins.
+  /**
+   * Read a shop's status lists inside its Hidemyacc profile and return one
+   * entry per order found.
+   *
+   * `pages` caps the calls per list, 50 orders each. Returns `{ needsLogin }`
+   * when the profile is not signed in to Etsy — that is the operator's to fix
+   * inside the profile, and the shop comes round again next cycle.
+   */
+  async readShop(shopName, { settings, profileId, pages = 5, pageDelayMs = 8000 }) {
+    const { browser, hma, profile, wasRunning } = await this.attach(settings, profileId);
+    this.log(`${shopName}: dùng profile Hidemyacc "${profile.name}"${wasRunning ? '' : ' (agent vừa mở)'}.`);
+
+    // A tab of the agent's own, so whatever the operator has open in the
+    // profile is left exactly where it was.
+    const page = await browser.newPage();
+
+    // One entry per order. An order is only in one list at a time, but it can
+    // move between two reads, so the later list wins.
     const collected = new Map();
 
-    for (const { param, status } of STATUS_PAGES) {
-      if (this.stopped) break;
+    try {
+      await page.goto(ORDERS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(3000);
 
-      for (let page = 1; page <= pages; page += 1) {
-        if (this.stopped) break;
-        await webContents.loadURL(statusUrl(param, page));
-        // Etsy renders the list after load; give it room before reading.
-        await sleep(3000);
+      const state = await page.evaluate(signInScript()).catch((error) => ({
+        signedIn: false,
+        reason: error.message,
+      }));
+      if (!state.signedIn) {
+        this.log(`${shopName}: profile "${profile.name}" chưa đăng nhập Etsy (${state.reason}).`);
+        return { needsLogin: true, orders: [] };
+      }
 
-        const state = await webContents.executeJavaScript(signInScript(), true).catch((error) => ({
-          signedIn: false,
-          reason: error.message,
-        }));
+      const shopIds = await page.evaluate(shopIdScript());
+      if (shopIds.length !== 1) {
+        throw new Error(`không xác định được mã shop trên trang đơn (thấy ${shopIds.length})`);
+      }
+      const [shopId] = shopIds;
 
-        if (!state.signedIn) {
-          window.show();
-          this.log(`${shopName}: cần đăng nhập Etsy trong cửa sổ vừa mở (${state.reason}).`);
-          return { needsLogin: true, orders: [] };
-        }
+      for (const list of STATUS_LISTS) {
+        let offset = 0;
+        let total = 0;
+        let read = 0;
 
-        const result = await webContents.executeJavaScript(scrapeScript(), true).catch((error) => {
-          this.log(`${shopName}/${param}: đọc trang ${page} lỗi — ${error.message}`);
-          return { ids: [], looksEmpty: false, length: 0 };
-        });
+        for (let call = 1; call <= pages; call += 1) {
+          if (this.stopped) break;
+          if (call > 1) await sleep(pageDelayMs);
 
-        if (!result.ids.length) {
-          // No orders is a normal answer for a filter; a page that never
-          // rendered is not. Say which one this was.
-          if (page === 1 && !result.looksEmpty) {
-            this.log(
-              `${shopName}/${param}: không thấy mã đơn nào và trang cũng không báo rỗng` +
-                ` (đọc được ${result.length} ký tự) — có thể Etsy đã đổi trang.`,
-            );
+          const result = await fetchOrders(page, shopId, list, offset);
+          if (result.error) {
+            this.log(`${shopName}/${list.param}: đọc lỗi ở vị trí ${offset} — ${result.error}`);
+            break;
           }
-          break;
+
+          total = result.total;
+          for (const order of result.orders) {
+            if (order.canceled) continue;
+            collected.set(order.orderId, {
+              orderId: order.orderId,
+              // Etsy's own wording when it gave one — WrL maps it, and it is
+              // finer than the list ("Out for delivery" sits in in_transit).
+              // The list's status covers the rare row without a label.
+              ...(order.summary ? { statusText: order.summary } : { status: list.status }),
+            });
+          }
+          read += result.orders.length;
+          offset += result.orders.length;
+          if (!result.orders.length || offset >= total) break;
         }
 
-        let added = 0;
-        for (const orderId of result.ids) {
-          if (!collected.has(orderId)) added += 1;
-          collected.set(orderId, { orderId, status });
+        this.log(`${shopName}/${list.param}: đọc ${read}/${total} đơn.`);
+        // pre_transit and in_transit are the lists that matter; say so when
+        // the cap cut one short. delivered is cut on purpose.
+        if (list.param !== 'delivered' && read < total && !this.stopped) {
+          this.log(`${shopName}/${list.param}: còn ${total - read} đơn chưa đọc — tăng "Số lượt đọc mỗi trạng thái".`);
         }
-
-        this.log(`${shopName}/${param}: trang ${page} — ${result.ids.length} đơn (${added} mới).`);
-
-        // Etsy repeats the last page when you ask past the end, so a page that
-        // adds nothing new is the end of the list.
-        if (!added) break;
-        if (page < pages) await sleep(pageDelayMs);
+        if (this.stopped) break;
+      }
+    } finally {
+      await page.close().catch(() => {});
+      // Let go of the profile but never close its browser from here: closing
+      // is Hidemyacc's job, so it can sync the profile back to the cloud.
+      await browser.disconnect().catch(() => {});
+      if (!wasRunning && settings.hmaCloseAfterRead) {
+        await hma
+          .stop(profileId)
+          .catch((error) => this.log(`${shopName}: không đóng được profile — ${error.message}`));
       }
     }
 
@@ -228,8 +298,8 @@ class EtsyReader {
 module.exports = {
   EtsyReader,
   ORDERS_URL,
-  STATUS_PAGES,
-  statusUrl,
-  scrapeScript,
+  PAGE_SIZE,
+  STATUS_LISTS,
   signInScript,
+  shopIdScript,
 };

@@ -25,10 +25,20 @@ const DEFAULTS = {
    * USPS). See src/etsy.js for why USPS has no third-party option.
    */
   lanes: 'both',
-  /** Order pages to read per shop in the Etsy lane. */
+  /** Calls per status list per shop in the Etsy lane, 50 orders each. */
   etsyPagesPerShop: 5,
-  /** Pause between order pages, in seconds. */
+  /** Pause between those calls, in seconds. */
   etsyPageDelaySeconds: 8,
+  /** Hidemyacc's local API; the Etsy lane reads each shop inside its profile. */
+  hmaUrl: 'http://127.0.0.1:2268',
+  /**
+   * Which Hidemyacc profile reads which shop: { [shopName]: profileId }.
+   * A shop left out here is matched by name when that is unambiguous — see
+   * guessProfile in src/hidemyacc.js.
+   */
+  hmaProfiles: {},
+  /** Close a profile after reading, but only one the agent opened itself. */
+  hmaCloseAfterRead: false,
   /** Keep working through the queue on a timer instead of one batch at a time. */
   autoRun: false,
   /** Minutes to idle after the queue empties before asking again. */

@@ -8,6 +8,7 @@ const config = require('./config');
 const { WrlClient } = require('./wrl');
 const { Tracker, MAX_PER_QUERY } = require('./tracker');
 const { EtsyReader } = require('./etsy');
+const { HidemyaccClient, guessProfile } = require('./hidemyacc');
 const updater = require('./updater');
 
 /**
@@ -21,7 +22,8 @@ const updater = require('./updater');
  *            2026-09-28, no free third-party route for a USPS number is left,
  *            and tools.usps.com blocks automated browsers outright — but Etsy
  *            has already resolved the carrier and shows the answer on the
- *            seller's own order list. See src/etsy.js.
+ *            seller's own order list, read inside each shop's Hidemyacc
+ *            profile. See src/etsy.js and src/hidemyacc.js.
  *
  * The queue and the answers both go through WrL (wearelucky.io.vn), which stays
  * the only thing that writes to the CMS.
@@ -154,34 +156,74 @@ async function runOnce() {
 // ------------------------------------------------------------- lane 2: Etsy
 
 /**
+ * Pair each shop with the Hidemyacc profile that reads it.
+ *
+ * The operator's choice in the window wins; a shop with no choice saved falls
+ * back to a name match, which is only made when it is unambiguous. Returns the
+ * profile list too, so the window can offer it as choices.
+ */
+async function resolveProfiles(settings, shops) {
+  const profiles = await new HidemyaccClient(settings).profiles();
+  const known = new Set(profiles.map((profile) => profile.id));
+  const chosen = settings.hmaProfiles || {};
+
+  const rows = shops.map((shop) => {
+    const saved = chosen[shop.shopName];
+    if (saved && known.has(saved)) return { ...shop, profileId: saved, guessed: false };
+    const guess = guessProfile(shop.shopName, profiles);
+    return { ...shop, profileId: guess ? guess.id : null, guessed: Boolean(guess) };
+  });
+  return { rows, profiles };
+}
+
+/**
  * Walk every shop that has parcels waiting and read their order pages.
  *
- * A shop whose Etsy session has lapsed is skipped, not retried in a loop: its
- * window is brought to the front for the operator to sign in, and it comes
- * round again next cycle.
+ * A shop with no profile, or whose profile is not signed in to Etsy, is
+ * skipped rather than retried in a loop — it is named in the log for the
+ * operator and comes round again next cycle.
  */
 async function runEtsyPass() {
   const settings = config.load(app);
   const client = new WrlClient(settings);
 
   const plan = await client.etsyPlan();
-  const shops = (plan.shops || []).filter((shop) => shop.waiting > 0);
+  const waitingShops = (plan.shops || []).filter((shop) => shop.waiting > 0);
 
-  if (!shops.length) {
+  if (!waitingShops.length) {
     log('Không shop nào còn đơn cần đọc trạng thái từ Etsy.');
     return { needsLogin: [] };
   }
 
-  log(`Đọc Etsy cho ${shops.length} shop (${plan.waiting} vận đơn đang chờ).`);
+  const { rows: shops } = await resolveProfiles(settings, waitingShops);
+  log(`Đọc Etsy cho ${shops.length} shop (${plan.waiting} vận đơn đang chờ) qua Hidemyacc.`);
   const needsLogin = [];
 
   for (const shop of shops) {
     if (stopRequested) break;
 
-    const { needsLogin: lapsed, orders } = await etsy.readShop(shop.shopName, {
-      pages: settings.etsyPagesPerShop || 5,
-      pageDelayMs: (settings.etsyPageDelaySeconds || 8) * 1000,
-    });
+    if (!shop.profileId) {
+      log(`${shop.shopName}: chưa chọn profile Hidemyacc — chọn trong mục "Profile Hidemyacc".`);
+      continue;
+    }
+
+    let read;
+    try {
+      read = await etsy.readShop(shop.shopName, {
+        settings,
+        profileId: shop.profileId,
+        pages: settings.etsyPagesPerShop || 5,
+        pageDelayMs: (settings.etsyPageDelaySeconds || 8) * 1000,
+      });
+    } catch (error) {
+      // One shop's profile failing to open must not cost the other shops
+      // their turn.
+      stats.errors += 1;
+      pushState();
+      log(`${shop.shopName}: không đọc được qua Hidemyacc — ${error.message}`);
+      continue;
+    }
+    const { needsLogin: lapsed, orders } = read;
 
     if (lapsed) {
       needsLogin.push(shop.shopName);
@@ -192,7 +234,17 @@ async function runEtsyPass() {
       continue;
     }
 
-    const applied = await client.submitEtsy(orders);
+    // WrL takes at most 500 orders a request; a big shop's three lists can
+    // run past that.
+    const applied = { matched: 0, updated: 0, delivered: 0, unknown: [], leftToOtherLane: 0 };
+    for (let start = 0; start < orders.length; start += 500) {
+      const part = await client.submitEtsy(orders.slice(start, start + 500));
+      applied.matched += part.matched || 0;
+      applied.updated += part.updated || 0;
+      applied.delivered += part.delivered || 0;
+      applied.unknown.push(...(part.unknown || []));
+      applied.leftToOtherLane += part.leftToOtherLane || 0;
+    }
     stats.etsyOrders += applied.matched || 0;
     stats.updated += applied.updated || 0;
     stats.delivered += applied.delivered || 0;
@@ -258,7 +310,7 @@ async function loop() {
         try {
           const { needsLogin } = await runEtsyPass();
           if (needsLogin.length) {
-            log(`Cần đăng nhập Etsy cho: ${needsLogin.join(', ')}.`);
+            log(`Cần đăng nhập Etsy trong profile Hidemyacc của: ${needsLogin.join(', ')}.`);
           }
         } catch (error) {
           stats.errors += 1;
@@ -316,7 +368,6 @@ ipcMain.handle('config:get', () => config.load(app));
 ipcMain.handle('config:save', (_event, patch) => {
   const next = config.save(app, patch);
   if (tracker) tracker.setVisible(Boolean(next.showBrowser));
-  if (etsy) etsy.setVisible(Boolean(next.showBrowser));
   // Keep "start with Windows" in step with autoRun, so the box only brings the
   // agent back if it is meant to be working unattended.
   if (app.isPackaged) {
@@ -365,22 +416,39 @@ ipcMain.handle('browser:show', async () => {
 });
 
 /**
- * Open a shop's Etsy window so the operator can sign in before a run.
- *
- * Signing in is theirs to do — the app never types credentials. It only keeps
- * the session, one browser profile per shop.
+ * The shop ↔ profile table for the window: every shop WrL knows, the profile
+ * each is paired with (saved or guessed), and every profile to choose from.
  */
-ipcMain.handle('etsy:login', async () => {
+ipcMain.handle('hma:mapping', async () => {
   const settings = config.load(app);
-  const client = new WrlClient(settings);
-  const plan = await client.etsyPlan();
-  const shops = plan.shops || [];
-  if (!shops.length) return { ok: false, message: 'WrL chưa có shop Etsy nào đang kết nối' };
+  const plan = await new WrlClient(settings).etsyPlan();
+  const { rows, profiles } = await resolveProfiles(settings, plan.shops || []);
+  return { shops: rows, profiles };
+});
 
-  for (const shop of shops) await etsy.open(shop.shopName, { show: true });
+/**
+ * Start every shop's profile through Hidemyacc.
+ *
+ * This replaces opening them by hand: a profile opened from the Hidemyacc
+ * window has no DevTools port, so the agent could never read it. Signing in to
+ * Etsy inside a profile stays the operator's job — the agent types nothing.
+ */
+ipcMain.handle('hma:open', async () => {
+  const settings = config.load(app);
+  const plan = await new WrlClient(settings).etsyPlan();
+  const { rows } = await resolveProfiles(settings, plan.shops || []);
+  const entries = rows.filter((row) => row.profileId);
+  const missing = rows.filter((row) => !row.profileId).map((row) => row.shopName);
+  if (!entries.length) return { ok: false, message: 'Chưa shop nào có profile Hidemyacc — chọn ở bảng bên dưới trước' };
+
+  const { opened, failed } = await etsy.openProfiles(settings, entries);
+  for (const line of failed) log(`Không mở được profile: ${line}`);
   return {
     ok: true,
-    message: `Đã mở ${shops.length} cửa sổ Etsy: ${shops.map((s) => s.shopName).join(', ')}. Sếp tự đăng nhập từng shop.`,
+    message:
+      `Đã mở ${opened.length}/${entries.length} profile qua Hidemyacc` +
+      (missing.length ? `. Chưa chọn profile: ${missing.join(', ')}` : '') +
+      '.',
   };
 });
 

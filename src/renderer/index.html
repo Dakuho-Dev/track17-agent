@@ -96,6 +96,12 @@
         font: 12px/1.6 Consolas, "Cascadia Mono", monospace;
         white-space: pre-wrap;
       }
+      p.hint { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+      .muted { color: var(--muted); }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 13px; }
+      th { text-align: left; font-weight: 600; font-size: 12px; color: var(--muted); padding: 4px 6px; }
+      td { padding: 4px 6px; border-top: 1px solid var(--line); }
+      td small { color: var(--warn); }
       #status { font-size: 12px; color: var(--muted); margin-left: auto; align-self: center; }
       #status.on { color: var(--ok); }
     </style>
@@ -106,7 +112,8 @@
       Tra trạng thái vận chuyển rồi gửi về WrL để đẩy sang CMS, bằng hai làn:
       <strong>17track.net</strong> cho các hãng không phải USPS, và
       <strong>trang đơn Etsy</strong> cho phần còn lại — USPS đã chặn hết đường tra
-      của bên thứ ba, nhưng Etsy thì đã tự tra sẵn rồi.
+      của bên thứ ba, nhưng Etsy thì đã tự tra sẵn rồi. Trang Etsy được đọc bên trong
+      profile Hidemyacc của từng shop.
     </p>
 
     <section>
@@ -123,7 +130,34 @@
         <button id="save">Lưu</button>
         <button id="test">Kiểm tra kết nối</button>
         <button id="open">Mở cửa sổ 17track</button>
-        <button id="etsy-login">Đăng nhập Etsy</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Profile Hidemyacc (làn Etsy / USPS)</h2>
+      <p class="hint">
+        Mỗi shop đọc đơn trong đúng profile Hidemyacc của shop đó. Giữ app Hidemyacc mở
+        và đăng nhập, rồi bấm <strong>Mở profile các shop</strong> — đừng mở profile bằng
+        tay trong Hidemyacc, vì profile mở tay không cho agent điều khiển.
+      </p>
+      <label>
+        <span>Địa chỉ API Hidemyacc</span>
+        <input type="text" id="hmaUrl" placeholder="http://127.0.0.1:2268" />
+      </label>
+      <table id="hma-table">
+        <thead><tr><th>Shop</th><th>Chờ</th><th>Profile</th></tr></thead>
+        <tbody><tr><td colspan="3" class="muted">Bấm "Tải danh sách" để ghép shop với profile.</td></tr></tbody>
+      </table>
+      <div class="check">
+        <input type="checkbox" id="hmaCloseAfterRead" />
+        <div>
+          Đóng profile sau khi đọc xong
+          <small>Chỉ đóng profile do agent tự mở; profile đang mở sẵn thì để nguyên.</small>
+        </div>
+      </div>
+      <div class="buttons">
+        <button id="hma-load">Tải danh sách</button>
+        <button id="hma-open">Mở profile các shop</button>
       </div>
     </section>
 
@@ -153,11 +187,11 @@
       </div>
       <div class="row">
         <label>
-          <span>Số trang đơn đọc mỗi shop</span>
+          <span>Số lượt đọc mỗi trạng thái (50 đơn/lượt)</span>
           <input type="number" id="etsyPagesPerShop" min="1" max="50" />
         </label>
         <label>
-          <span>Nghỉ giữa hai trang Etsy (giây)</span>
+          <span>Nghỉ giữa hai lượt đọc Etsy (giây)</span>
           <input type="number" id="etsyPageDelaySeconds" min="2" max="120" />
         </label>
       </div>
