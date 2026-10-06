@@ -1,6 +1,6 @@
 {
   "name": "track17-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Local agent: reads parcel status off 17track.net and the seller's own Etsy order pages, and hands the result back to WrL",
   "main": "src/main.js",
