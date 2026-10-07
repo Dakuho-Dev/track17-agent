@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 /**
@@ -39,6 +40,18 @@ const DEFAULTS = {
   hmaProfiles: {},
   /** Close a profile after reading, but only one the agent opened itself. */
   hmaCloseAfterRead: false,
+  /**
+   * Download each shop's Etsy CSV at the times set on the CMS page "Tải Etsy
+   * CSV" (see src/csv-download.js). The CSV type and the timetable live in the
+   * CMS; only where the files go is set here.
+   */
+  csvEnabled: true,
+  /** The CMS API that holds that config. */
+  cmsApiUrl: 'https://apiserver.dakuho.com',
+  /** Where the CSVs are saved, one folder per shop. */
+  csvDownloadDir: path.join(os.homedir(), 'Downloads', 'Etsy CSV'),
+  /** Timetable slots already run ("2026-10-07 08:00"), so a restart does not repeat one. */
+  csvDoneSlots: [],
   /** Keep working through the queue on a timer instead of one batch at a time. */
   autoRun: false,
   /** Minutes to idle after the queue empties before asking again. */

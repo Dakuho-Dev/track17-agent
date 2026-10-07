@@ -1,6 +1,5 @@
 'use strict';
 
-const puppeteer = require('puppeteer-core');
 const { HidemyaccClient } = require('./hidemyacc');
 
 /**
@@ -149,9 +148,13 @@ async function fetchOrders(page, shopId, list, offset) {
 }
 
 class EtsyReader {
-  /** @param {(message: string) => void} log */
-  constructor(log) {
+  /**
+   * @param {(message: string) => void} log
+   * @param {import('./profile-pool').ProfilePool} pool shared with the CSV downloader
+   */
+  constructor(log, pool) {
     this.log = log;
+    this.pool = pool;
     /** Set while the operator has asked to stop; a shop walk can take minutes. */
     this.stopped = false;
   }
@@ -159,25 +162,6 @@ class EtsyReader {
   /** Let the control window interrupt a walk between pages. */
   setStopped(stopped) {
     this.stopped = Boolean(stopped);
-  }
-
-  /**
-   * Start a shop's profile through Hidemyacc and attach to it.
-   *
-   * Also reports whether the profile was already running, so one the agent
-   * opened itself can be closed again afterwards without touching one the
-   * operator opened.
-   */
-  async attach(settings, profileId) {
-    const hma = new HidemyaccClient(settings);
-    const profile = (await hma.profiles()).find((candidate) => candidate.id === profileId);
-    if (!profile) throw new Error(`không còn profile ${profileId} trên Hidemyacc`);
-
-    const { wsUrl } = await hma.start(profileId);
-    // defaultViewport null: leave the profile's own window size alone — an
-    // emulated viewport is one more thing that would differ from a person.
-    const browser = await puppeteer.connect({ browserWSEndpoint: wsUrl, defaultViewport: null });
-    return { browser, hma, profile, wasRunning: profile.status === 'running' };
   }
 
   /**
@@ -210,88 +194,81 @@ class EtsyReader {
    * inside the profile, and the shop comes round again next cycle.
    */
   async readShop(shopName, { settings, profileId, pages = 5, pageDelayMs = 8000 }) {
-    const { browser, hma, profile, wasRunning } = await this.attach(settings, profileId);
-    this.log(`${shopName}: dùng profile Hidemyacc "${profile.name}"${wasRunning ? '' : ' (agent vừa mở)'}.`);
+    return this.pool.use(settings, profileId, async (browser, profile) => {
+      this.log(`${shopName}: dùng profile Hidemyacc "${profile.name}"${profile.openedByAgent ? ' (agent vừa mở)' : ''}.`);
 
-    // A tab of the agent's own, so whatever the operator has open in the
-    // profile is left exactly where it was.
-    const page = await browser.newPage();
+      // A tab of the agent's own, so whatever the operator has open in the
+      // profile is left exactly where it was.
+      const page = await browser.newPage();
 
-    // One entry per order. An order is only in one list at a time, but it can
-    // move between two reads, so the later list wins.
-    const collected = new Map();
+      // One entry per order. An order is only in one list at a time, but it can
+      // move between two reads, so the later list wins.
+      const collected = new Map();
 
-    try {
-      await page.goto(ORDERS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await sleep(3000);
+      try {
+        await page.goto(ORDERS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await sleep(3000);
 
-      const state = await page.evaluate(signInScript()).catch((error) => ({
-        signedIn: false,
-        reason: error.message,
-      }));
-      if (!state.signedIn) {
-        this.log(`${shopName}: profile "${profile.name}" chưa đăng nhập Etsy (${state.reason}).`);
-        return { needsLogin: true, orders: [] };
-      }
+        const state = await page.evaluate(signInScript()).catch((error) => ({
+          signedIn: false,
+          reason: error.message,
+        }));
+        if (!state.signedIn) {
+          this.log(`${shopName}: profile "${profile.name}" chưa đăng nhập Etsy (${state.reason}).`);
+          return { needsLogin: true, orders: [] };
+        }
 
-      const shopIds = await page.evaluate(shopIdScript());
-      if (shopIds.length !== 1) {
-        throw new Error(`không xác định được mã shop trên trang đơn (thấy ${shopIds.length})`);
-      }
-      const [shopId] = shopIds;
+        const shopIds = await page.evaluate(shopIdScript());
+        if (shopIds.length !== 1) {
+          throw new Error(`không xác định được mã shop trên trang đơn (thấy ${shopIds.length})`);
+        }
+        const [shopId] = shopIds;
 
-      for (const list of STATUS_LISTS) {
-        let offset = 0;
-        let total = 0;
-        let read = 0;
+        for (const list of STATUS_LISTS) {
+          let offset = 0;
+          let total = 0;
+          let read = 0;
 
-        for (let call = 1; call <= pages; call += 1) {
+          for (let call = 1; call <= pages; call += 1) {
+            if (this.stopped) break;
+            if (call > 1) await sleep(pageDelayMs);
+
+            const result = await fetchOrders(page, shopId, list, offset);
+            if (result.error) {
+              this.log(`${shopName}/${list.param}: đọc lỗi ở vị trí ${offset} — ${result.error}`);
+              break;
+            }
+
+            total = result.total;
+            for (const order of result.orders) {
+              if (order.canceled) continue;
+              collected.set(order.orderId, {
+                orderId: order.orderId,
+                // Etsy's own wording when it gave one — WrL maps it, and it is
+                // finer than the list ("Out for delivery" sits in in_transit).
+                // The list's status covers the rare row without a label.
+                ...(order.summary ? { statusText: order.summary } : { status: list.status }),
+              });
+            }
+            read += result.orders.length;
+            offset += result.orders.length;
+            if (!result.orders.length || offset >= total) break;
+          }
+
+          this.log(`${shopName}/${list.param}: đọc ${read}/${total} đơn.`);
+          // pre_transit and in_transit are the lists that matter; say so when
+          // the cap cut one short. delivered is cut on purpose.
+          if (list.param !== 'delivered' && read < total && !this.stopped) {
+            this.log(`${shopName}/${list.param}: còn ${total - read} đơn chưa đọc — tăng "Số lượt đọc mỗi trạng thái".`);
+          }
           if (this.stopped) break;
-          if (call > 1) await sleep(pageDelayMs);
-
-          const result = await fetchOrders(page, shopId, list, offset);
-          if (result.error) {
-            this.log(`${shopName}/${list.param}: đọc lỗi ở vị trí ${offset} — ${result.error}`);
-            break;
-          }
-
-          total = result.total;
-          for (const order of result.orders) {
-            if (order.canceled) continue;
-            collected.set(order.orderId, {
-              orderId: order.orderId,
-              // Etsy's own wording when it gave one — WrL maps it, and it is
-              // finer than the list ("Out for delivery" sits in in_transit).
-              // The list's status covers the rare row without a label.
-              ...(order.summary ? { statusText: order.summary } : { status: list.status }),
-            });
-          }
-          read += result.orders.length;
-          offset += result.orders.length;
-          if (!result.orders.length || offset >= total) break;
         }
-
-        this.log(`${shopName}/${list.param}: đọc ${read}/${total} đơn.`);
-        // pre_transit and in_transit are the lists that matter; say so when
-        // the cap cut one short. delivered is cut on purpose.
-        if (list.param !== 'delivered' && read < total && !this.stopped) {
-          this.log(`${shopName}/${list.param}: còn ${total - read} đơn chưa đọc — tăng "Số lượt đọc mỗi trạng thái".`);
-        }
-        if (this.stopped) break;
+      } finally {
+        await page.close().catch(() => {});
       }
-    } finally {
-      await page.close().catch(() => {});
-      // Let go of the profile but never close its browser from here: closing
-      // is Hidemyacc's job, so it can sync the profile back to the cloud.
-      await browser.disconnect().catch(() => {});
-      if (!wasRunning && settings.hmaCloseAfterRead) {
-        await hma
-          .stop(profileId)
-          .catch((error) => this.log(`${shopName}: không đóng được profile — ${error.message}`));
-      }
-    }
 
-    return { needsLogin: false, orders: [...collected.values()] };
+      return { needsLogin: false, orders: [...collected.values()] };
+    });
   }
 }
 

@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('agent', {
   showBrowser: () => ipcRenderer.invoke('browser:show'),
   hmaMapping: () => ipcRenderer.invoke('hma:mapping'),
   hmaOpen: () => ipcRenderer.invoke('hma:open'),
+  csvRun: () => ipcRenderer.invoke('csv:run'),
+  csvStatus: () => ipcRenderer.invoke('csv:status'),
   onLog: (handler) => ipcRenderer.on('agent:log', (_event, line) => handler(line)),
   onState: (handler) => ipcRenderer.on('agent:state', (_event, state) => handler(state)),
 });

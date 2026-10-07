@@ -121,9 +121,10 @@ class HidemyaccClient {
  * Guess which profile belongs to a shop when the operator has not said.
  *
  * Profile names on this account look like "Quỳnh Anh - Macievision - Phương"
- * or "Backup - Macievision": the shop name is in there, but often in several
- * profiles at once. A guess is only made when it is unambiguous — exactly one
- * match, or exactly one match that is already running. Anything else returns
+ * or "Wakeup 24/7 - Macievision": the shop name is in there, but often in
+ * several profiles at once. A guess is only made when it is unambiguous —
+ * exactly one match, exactly one "Wakeup 24/7" match, or exactly one match
+ * that is already running. Anything else returns
  * null and the operator picks in the window, because reading orders from the
  * wrong shop's login would quietly report nothing.
  */
@@ -132,6 +133,10 @@ function guessProfile(shopName, profiles) {
   if (!key) return null;
   const matches = profiles.filter((profile) => fold(profile.name).includes(key));
   if (matches.length === 1) return matches[0];
+  // The account keeps one "Wakeup 24/7 - <shop>" profile per shop for the
+  // agent (seen 2026-10-07) — that is the one to use when there are several.
+  const agentOwn = matches.filter((profile) => fold(profile.name).startsWith('wakeup247'));
+  if (agentOwn.length === 1) return agentOwn[0];
   const running = matches.filter((profile) => profile.status === 'running');
   if (running.length === 1) return running[0];
   return null;

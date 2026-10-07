@@ -3,9 +3,9 @@
 /** The control window: a form over config.json, a Start/Stop pair, and a log. */
 
 const fields = {
-  text: ['baseUrl', 'token', 'hmaUrl'],
+  text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl'],
   number: ['batchSize', 'batchDelaySeconds', 'idleMinutes', 'etsyPagesPerShop', 'etsyPageDelaySeconds'],
-  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead'],
+  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled'],
   select: ['lanes'],
 };
 
@@ -147,6 +147,25 @@ el('hma-open').addEventListener('click', async () => {
   }
 });
 
+// ------------------------------------------------------------ CSV export
+
+async function loadCsvStatus() {
+  try {
+    const s = await window.agent.csvStatus();
+    el('csv-schedule').textContent = s.scheduleEnabled && s.times.length
+      ? `Lịch trên CMS: ${s.csvType} lúc ${s.times.join(', ')} (giờ Việt Nam).`
+      : `CMS chưa bật lịch tự tải (loại CSV: ${s.csvType}). Bật ở trang Tải Etsy CSV.`;
+  } catch (error) {
+    el('csv-schedule').textContent = `Không đọc được lịch từ CMS: ${error.message}`;
+  }
+}
+
+el('csv-run').addEventListener('click', async () => {
+  await save();
+  const result = await window.agent.csvRun();
+  appendLog(result.message);
+});
+
 el('start').addEventListener('click', async () => {
   // Save first: an operator who edits a field and presses Start expects the
   // run to use what is on screen, not what was last saved.
@@ -179,4 +198,5 @@ window.agent.getConfig().then((settings) => {
   fillForm(settings);
   // The table needs WrL for the shop list, so only once there is a token.
   if (settings.token) loadMapping();
+  loadCsvStatus();
 });

@@ -8,6 +8,8 @@ const config = require('./config');
 const { WrlClient } = require('./wrl');
 const { Tracker, MAX_PER_QUERY } = require('./tracker');
 const { EtsyReader } = require('./etsy');
+const { CsvDownloader, dueSlot, parseTimes, vietnamNow } = require('./csv-download');
+const { ProfilePool } = require('./profile-pool');
 const { HidemyaccClient, guessProfile } = require('./hidemyacc');
 const updater = require('./updater');
 
@@ -32,6 +34,9 @@ const updater = require('./updater');
 let controlWindow = null;
 let tracker = null;
 let etsy = null;
+let csv = null;
+/** Set while a CSV round is running — it has its own timer, apart from `running`. */
+let csvRunning = false;
 
 /** Set while the loop is working, so Start cannot stack two loops. */
 let running = false;
@@ -262,6 +267,88 @@ async function runEtsyPass() {
   return { needsLogin };
 }
 
+// --------------------------------------------------------- job 3: CSV export
+
+/**
+ * Download every shop's Etsy CSV for the current month (src/csv-download.js).
+ *
+ * Runs beside the status loop, not inside it: it has its own timer and its
+ * own busy flag, and borrows the profiles through the same pool. Every shop
+ * WrL knows is fetched, not only those with parcels waiting.
+ */
+async function runCsvRound(reason) {
+  if (csvRunning) return { ok: false, message: 'Đang có một lượt tải CSV chạy' };
+  csvRunning = true;
+  try {
+    const settings = config.load(app);
+    const cmsConfig = await csv.fetchConfig(settings);
+    const plan = await new WrlClient(settings).etsyPlan();
+    const { rows } = await resolveProfiles(settings, plan.shops || []);
+    const { month, year } = vietnamNow();
+    log(`Tải CSV Etsy (${reason}): ${cmsConfig.csvType}, tháng ${month}/${year}, ${rows.length} shop.`);
+
+    let saved = 0;
+    for (const shop of rows) {
+      if (!shop.profileId) {
+        log(`${shop.shopName}: chưa chọn profile Hidemyacc — bỏ qua tải CSV.`);
+        continue;
+      }
+      try {
+        const result = await csv.downloadShop(shop.shopName, { settings, profileId: shop.profileId, csvType: cmsConfig.csvType });
+        if (result.file) saved += 1;
+      } catch (error) {
+        stats.errors += 1;
+        pushState();
+        log(`${shop.shopName}: tải CSV lỗi — ${error.message}`);
+      }
+    }
+    log(`Tải CSV xong: ${saved}/${rows.length} shop. Thư mục: ${settings.csvDownloadDir}`);
+    return { ok: true, message: `Đã tải CSV cho ${saved}/${rows.length} shop` };
+  } catch (error) {
+    log(`Tải CSV lỗi: ${error.message}`);
+    return { ok: false, message: error.message };
+  } finally {
+    csvRunning = false;
+  }
+}
+
+/**
+ * Check the CMS timetable once a minute and run a round when a slot comes due.
+ *
+ * The slot is recorded before the round starts, so a round that fails or a
+ * restart in the middle does not fire the same slot twice.
+ */
+function startCsvTimer() {
+  let cached = null;
+  let cachedAt = 0;
+
+  const tick = async () => {
+    const settings = config.load(app);
+    if (!settings.csvEnabled || csvRunning || !settings.baseUrl || !settings.token) return;
+    try {
+      // The timetable changes rarely; asking the CMS every minute is not needed.
+      if (!cached || Date.now() - cachedAt > 5 * 60000) {
+        cached = await csv.fetchConfig(settings);
+        cachedAt = Date.now();
+      }
+    } catch (error) {
+      return; // CMS unreachable this minute — try again next tick, quietly.
+    }
+    if (!cached.scheduleEnabled || !parseTimes(cached.scheduleTimes).length) return;
+
+    const done = Array.isArray(settings.csvDoneSlots) ? settings.csvDoneSlots : [];
+    const slot = dueSlot(cached.scheduleTimes, done);
+    if (!slot) return;
+
+    config.save(app, { csvDoneSlots: [...done, slot].slice(-50) });
+    cached = null; // pick up any change made in the CMS since
+    await runCsvRound(`khung giờ ${slot.slice(11)}`);
+  };
+
+  setInterval(() => tick().catch(() => {}), 60000);
+  setTimeout(() => tick().catch(() => {}), 15000);
+}
+
 // --------------------------------------------------------------------- loop
 
 async function loop() {
@@ -433,6 +520,26 @@ ipcMain.handle('hma:mapping', async () => {
  * window has no DevTools port, so the agent could never read it. Signing in to
  * Etsy inside a profile stays the operator's job — the agent types nothing.
  */
+/** "Tải CSV ngay": one round now, whatever the timetable says. */
+ipcMain.handle('csv:run', async () => {
+  if (csvRunning) return { ok: false, message: 'Đang có một lượt tải CSV chạy' };
+  // Answer at once; a round takes a minute or two per shop and reports in the log.
+  runCsvRound('bấm tay');
+  return { ok: true, message: 'Bắt đầu tải CSV — theo dõi ở nhật ký.' };
+});
+
+/** What the CMS timetable says, for the window. */
+ipcMain.handle('csv:status', async () => {
+  const settings = config.load(app);
+  const cms = await csv.fetchConfig(settings);
+  return {
+    csvType: cms.csvType,
+    scheduleEnabled: Boolean(cms.scheduleEnabled),
+    times: parseTimes(cms.scheduleTimes),
+    now: vietnamNow(),
+  };
+});
+
 ipcMain.handle('hma:open', async () => {
   const settings = config.load(app);
   const plan = await new WrlClient(settings).etsyPlan();
@@ -470,12 +577,16 @@ if (!app.requestSingleInstanceLock()) {
     trimLogFile();
     createControlWindow();
     tracker = new Tracker(log);
-    etsy = new EtsyReader(log);
+    // One pool for both jobs, so neither closes a profile the other is using.
+    const pool = new ProfilePool();
+    etsy = new EtsyReader(log, pool);
+    csv = new CsvDownloader(log, pool);
+    startCsvTimer();
 
     // Watch for new releases and restart into them when nothing is in flight.
     // `running` is the whole definition of busy: while it is true a batch is
     // claimed from WrL or a shop's order pages are half-read.
-    updater.start({ log, isBusy: () => running });
+    updater.start({ log, isBusy: () => running || csvRunning });
 
     // Nobody is at the keyboard of a machine left running, so the app has to
     // start working by itself after a reboot, a crash restart, or the restart

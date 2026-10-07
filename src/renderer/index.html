@@ -162,6 +162,34 @@
     </section>
 
     <section>
+      <h2>Tải CSV Etsy theo giờ</h2>
+      <p class="hint">
+        Loại CSV và khung giờ đặt ở trang <strong>Tải Etsy CSV</strong> trên CMS. Đến giờ, agent mở profile
+        Hidemyacc của từng shop, chọn loại CSV đó cùng <strong>tháng và năm hiện tại</strong> rồi bấm Download CSV —
+        chạy song song với việc đọc trạng thái đơn.
+      </p>
+      <p class="hint" id="csv-schedule">Đang đọc lịch từ CMS…</p>
+      <div class="check">
+        <input type="checkbox" id="csvEnabled" />
+        <div>
+          Bật tự tải CSV theo lịch của CMS
+          <small>Tắt thì chỉ tải khi bấm "Tải CSV ngay".</small>
+        </div>
+      </div>
+      <label>
+        <span>Thư mục lưu CSV (mỗi shop một thư mục con)</span>
+        <input type="text" id="csvDownloadDir" />
+      </label>
+      <label>
+        <span>Địa chỉ API của CMS</span>
+        <input type="text" id="cmsApiUrl" placeholder="https://apiserver.dakuho.com" />
+      </label>
+      <div class="buttons">
+        <button id="csv-run">Tải CSV ngay</button>
+      </div>
+    </section>
+
+    <section>
       <h2>Cách chạy</h2>
       <label>
         <span>Làn nào chạy</span>
