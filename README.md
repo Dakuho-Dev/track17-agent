@@ -75,6 +75,27 @@ Team trở lên (không thì Hidemyacc trả 402).
 App **không** nói chuyện trực tiếp với CMS. Mọi thứ đi qua WrL, nên dữ liệu vẫn qua đúng
 một đường kiểm tra và một hàng đợi.
 
+## Tải CSV Etsy theo giờ
+
+Việc thứ ba, chạy song song với hai làn tra vận đơn. Loại CSV và khung giờ đặt ở trang
+**Tải Etsy CSV** trên CMS (ô "Tự tải theo giờ", VD `08:00, 14:30, 20:00`, giờ Việt Nam).
+Đến giờ, với mỗi shop đã có profile Hidemyacc, agent:
+
+1. mở profile qua Hidemyacc, mở một tab riêng tới `etsy.com/your/shops/me/download`;
+2. chọn loại CSV theo CMS, chọn **tháng và năm hiện tại** (không dùng ô tháng/năm của CMS);
+3. bấm nút **Download CSV** của mục Orders;
+4. bắt file qua DevTools, lưu vào `<Thư mục lưu CSV>/<shop>/<shop> - <tên file Etsy>.csv`.
+   Lượt sau trong cùng tháng ghi đè file cũ — file mới luôn đủ hơn.
+
+Mỗi khung giờ chạy đúng một lần (nhớ cả qua lần khởi động lại); agent tắt suốt một tiếng
+sau khung giờ thì bỏ khung đó chứ không chạy bù. Nút **Tải CSV ngay** chạy một lượt bất kể lịch.
+
+Hai việc cùng dùng một profile được nhờ một "pool" đếm người dùng: profile chỉ bị đóng
+(khi bật "Đóng profile sau khi đọc xong") lúc không còn việc nào dùng nó, và chỉ khi chính
+agent đã mở nó.
+
+Agent tự ghép shop với profile tên **"Wakeup 24/7 - <shop>"** khi shop có nhiều profile.
+
 ## Cài đặt trên máy treo 24/7
 
 Tải `Track17-Agent-Setup-<version>.exe` ở
