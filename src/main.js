@@ -8,7 +8,7 @@ const config = require('./config');
 const { WrlClient } = require('./wrl');
 const { Tracker, MAX_PER_QUERY } = require('./tracker');
 const { EtsyReader } = require('./etsy');
-const { CsvDownloader, dueSlot, parseTimes, vietnamNow } = require('./csv-download');
+const { CsvDownloader, dueSlot, parseTimes, parseCsvTypes, vietnamNow } = require('./csv-download');
 const { ProfilePool } = require('./profile-pool');
 const { HidemyaccClient, guessProfile } = require('./hidemyacc');
 const updater = require('./updater');
@@ -285,25 +285,41 @@ async function runCsvRound(reason) {
     const plan = await new WrlClient(settings).etsyPlan();
     const { rows } = await resolveProfiles(settings, plan.shops || []);
     const { month, year } = vietnamNow();
-    log(`Tải CSV Etsy (${reason}): ${cmsConfig.csvType}, tháng ${month}/${year}, ${rows.length} shop.`);
+    const csvTypes = parseCsvTypes(cmsConfig.csvType);
+    if (!csvTypes.length) throw new Error('CMS chưa chọn loại CSV nào — tích ít nhất một loại ở trang "Tải Etsy CSV"');
+    log(`Tải CSV Etsy (${reason}): ${csvTypes.join(' + ')}, tháng ${month}/${year}, ${rows.length} shop.`);
 
+    // Etsy now emails the export instead of handing it over (see
+    // src/csv-download.js), so most rounds end in "requested", not "saved".
+    // Counted per shop × type: 5 shops with 2 types each is 10 exports.
+    const total = rows.filter((shop) => shop.profileId).length * csvTypes.length;
     let saved = 0;
+    let requested = 0;
     for (const shop of rows) {
       if (!shop.profileId) {
         log(`${shop.shopName}: chưa chọn profile Hidemyacc — bỏ qua tải CSV.`);
         continue;
       }
       try {
-        const result = await csv.downloadShop(shop.shopName, { settings, profileId: shop.profileId, csvType: cmsConfig.csvType });
-        if (result.file) saved += 1;
+        const result = await csv.downloadShop(shop.shopName, { settings, profileId: shop.profileId, csvTypes });
+        const failed = (result.results || []).filter((one) => one.error).length;
+        saved += (result.results || []).filter((one) => one.file).length;
+        requested += (result.results || []).filter((one) => one.requested).length;
+        if (failed) {
+          stats.errors += failed;
+          pushState();
+        }
       } catch (error) {
         stats.errors += 1;
         pushState();
         log(`${shop.shopName}: tải CSV lỗi — ${error.message}`);
       }
     }
-    log(`Tải CSV xong: ${saved}/${rows.length} shop. Thư mục: ${settings.csvDownloadDir}`);
-    return { ok: true, message: `Đã tải CSV cho ${saved}/${rows.length} shop` };
+    const summary =
+      `${requested}/${total} lượt (shop × loại CSV) đã gửi yêu cầu (Etsy sẽ email link tải)` +
+      (saved ? `, ${saved} lượt tải được file ngay vào ${settings.csvDownloadDir}` : '');
+    log(`CSV xong: ${summary}.`);
+    return { ok: true, message: `CSV: ${summary}` };
   } catch (error) {
     log(`Tải CSV lỗi: ${error.message}`);
     return { ok: false, message: error.message };
@@ -533,7 +549,7 @@ ipcMain.handle('csv:status', async () => {
   const settings = config.load(app);
   const cms = await csv.fetchConfig(settings);
   return {
-    csvType: cms.csvType,
+    csvType: parseCsvTypes(cms.csvType).join(' + '),
     scheduleEnabled: Boolean(cms.scheduleEnabled),
     times: parseTimes(cms.scheduleTimes),
     now: vietnamNow(),

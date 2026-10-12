@@ -95,6 +95,15 @@ class HidemyaccClient {
             'Đợi họ đóng, hoặc chọn profile khác của shop này',
         );
       }
+      // Measured 2026-10-08 on the 24/7 box: a profile opened by hand in the
+      // Hidemyacc window answers 409 "Being use" — it is running, but not in a
+      // way the API can hand over (no DevTools port, see the top of this file).
+      if (/lỗi 409/.test(error.message)) {
+        throw new Error(
+          'Hidemyacc báo profile đang được dùng (409 "Being use") — thường do profile được mở tay trong cửa sổ ' +
+            'Hidemyacc. Đóng profile đó rồi bấm "Mở profile các shop" trong agent để agent mở lại',
+        );
+      }
       throw error;
     }
     if (!data || !data.wsUrl || !data.port) {
