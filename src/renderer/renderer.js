@@ -3,8 +3,8 @@
 /** The control window: a form over config.json, a Start/Stop pair, and a log. */
 
 const fields = {
-  text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl'],
-  number: ['batchSize', 'batchDelaySeconds', 'idleMinutes', 'etsyPagesPerShop', 'etsyPageDelaySeconds'],
+  text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl', 'dailyRunTime'],
+  number: ['batchSize', 'batchDelaySeconds', 'etsyPagesPerShop', 'etsyPageDelaySeconds'],
   check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled'],
   select: ['lanes'],
 };

@@ -367,6 +367,33 @@ function startCsvTimer() {
 
 // --------------------------------------------------------------------- loop
 
+/** "07:00" from settings, falling back to 07:00 when the field is empty or malformed. */
+function dailyTime(settings) {
+  return parseTimes(settings.dailyRunTime)[0] || '07:00';
+}
+
+/** Today's round is due: past the set time and not yet finished today (Vietnam time). */
+function dailyDue(settings) {
+  const now = vietnamNow();
+  return settings.lastDailyRun !== now.date && now.time >= dailyTime(settings);
+}
+
+/** Wait, a minute at a time so Stop still answers, until today's round is due. */
+async function waitForDailyRound() {
+  let announced = false;
+  while (!stopRequested) {
+    const settings = config.load(app);
+    if (!settings.autoRun || dailyDue(settings)) return;
+    if (!announced) {
+      const today = vietnamNow();
+      const when = settings.lastDailyRun === today.date ? 'ngày mai' : 'hôm nay';
+      log(`Lượt quét tiếp theo: ${dailyTime(settings)} ${when} (giờ VN). Agent chờ đến lúc đó.`);
+      announced = true;
+    }
+    await sleep(60000);
+  }
+}
+
 async function loop() {
   const settings = config.load(app);
   const lanes = settings.lanes || 'both';
@@ -379,6 +406,11 @@ async function loop() {
   pushState();
 
   try {
+    // Continuous mode works to a daily timetable: wait for the set time, run
+    // the whole round, then wait for tomorrow. Without autoRun, Start runs one
+    // batch straight away as before.
+    if (settings.autoRun) await waitForDailyRound();
+
     while (!stopRequested) {
       // 17track first, one batch per turn: it is the cheaper lane and its
       // queue is what fills up fastest.
@@ -424,9 +456,11 @@ async function loop() {
 
       if (stopRequested || !settings.autoRun) break;
 
-      const minutes = settings.idleMinutes || 30;
-      log(`Nghỉ ${minutes} phút rồi kiểm tra lại.`);
-      await sleep(minutes * 60000);
+      // The round is complete — 17track's queue is empty and every shop has
+      // been read. Mark today done and sleep until tomorrow's slot.
+      config.save(app, { lastDailyRun: vietnamNow().date });
+      log('Xong lượt quét hôm nay.');
+      await waitForDailyRound();
     }
   } finally {
     running = false;

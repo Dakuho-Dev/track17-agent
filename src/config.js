@@ -54,8 +54,15 @@ const DEFAULTS = {
   csvDoneSlots: [],
   /** Keep working through the queue on a timer instead of one batch at a time. */
   autoRun: false,
-  /** Minutes to idle after the queue empties before asking again. */
-  idleMinutes: 30,
+  /**
+   * With autoRun on, one full round a day at this time (Vietnam time, "HH:MM"):
+   * 17track until its queue is empty, then every shop's Etsy pages once.
+   * Parcels rarely change status more than once a day, so rounds every 30
+   * minutes mostly re-read the same answers (Sếp, 13/10/2026).
+   */
+  dailyRunTime: '07:00',
+  /** Vietnam date ("2026-10-13") of the last finished daily round. */
+  lastDailyRun: '',
   /** Show the 17track window. Off puts it out of the way but still running. */
   showBrowser: true,
 };

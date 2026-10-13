@@ -209,8 +209,8 @@
           <input type="number" id="batchDelaySeconds" min="5" max="600" />
         </label>
         <label>
-          <span>Nghỉ khi hết hàng đợi (phút)</span>
-          <input type="number" id="idleMinutes" min="1" max="1440" />
+          <span>Quét mỗi ngày lúc (giờ VN)</span>
+          <input type="time" id="dailyRunTime" />
         </label>
       </div>
       <div class="row">
@@ -226,8 +226,8 @@
       <div class="check">
         <input type="checkbox" id="autoRun" />
         <div>
-          Chạy liên tục
-          <small>Bỏ chọn thì mỗi lần bấm Bắt đầu chỉ tra một lượt 40 mã.</small>
+          Tự quét mỗi ngày
+          <small>Mỗi ngày một lượt vào giờ ở trên: tra hết mã trên 17track rồi đọc trang đơn Etsy của từng shop. Bỏ chọn thì mỗi lần bấm Bắt đầu chỉ tra một lượt 40 mã.</small>
         </div>
       </div>
       <div class="check">
