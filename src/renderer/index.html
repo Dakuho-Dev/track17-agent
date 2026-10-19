@@ -190,6 +190,29 @@
     </section>
 
     <section>
+      <h2>Tin nhắn Etsy về CMS</h2>
+      <p class="hint">
+        Cứ vài phút agent đọc hộp thư của từng shop trong profile Hidemyacc của shop đó, đẩy hội thoại mới lên mục
+        <strong>Tin nhắn</strong> của CMS, rồi gửi các câu trả lời nhân viên viết ở đó. Đọc tin không làm tin thành
+        "đã đọc" trên Etsy. Dùng chung địa chỉ API của CMS ở trên.
+      </p>
+      <div class="check">
+        <input type="checkbox" id="inboxEnabled" />
+        <div>
+          Bật đồng bộ tin nhắn (mỗi 5 phút)
+          <small>Tắt thì chỉ chạy khi bấm "Quét tin nhắn ngay".</small>
+        </div>
+      </div>
+      <label>
+        <span>Token tin nhắn (ETSY_INBOX_AGENT_TOKEN trên máy chủ CMS)</span>
+        <input type="password" id="inboxToken" placeholder="dán token vào đây" />
+      </label>
+      <div class="buttons">
+        <button id="inbox-run">Quét tin nhắn ngay</button>
+      </div>
+    </section>
+
+    <section>
       <h2>Cách chạy</h2>
       <label>
         <span>Làn nào chạy</span>

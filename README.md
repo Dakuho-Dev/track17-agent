@@ -96,6 +96,22 @@ agent đã mở nó.
 
 Agent tự ghép shop với profile tên **"Wakeup 24/7 - <shop>"** khi shop có nhiều profile.
 
+## Tin nhắn Etsy về CMS
+
+Việc thứ tư (từ bản 1.5.0, `src/inbox.js`). Etsy Open API không có tin nhắn, nên mỗi 5 phút
+agent đọc hộp thư từng shop trong profile Hidemyacc của shop đó và đẩy về mục **Tin nhắn**
+của CMS (`apiserver.dakuho.com/etsy-inbox/agent/*`, header `x-agent-token` =
+`ETSY_INBOX_AGENT_TOKEN` của máy chủ). Mỗi lượt, với từng shop:
+
+1. gửi các câu trả lời nhân viên viết trên CMS (mỗi câu gửi đúng một lần; không chắc Etsy đã
+   nhận thì báo "chưa rõ" để người xem trên Etsy, không tự gửi lại);
+2. đọc trang đầu của Inbox (20 hội thoại; đọc thêm trang khi cả trang đều mới);
+3. đọc tin của các hội thoại CMS hỏi (mới, hoặc Etsy đếm nhiều tin hơn đã lưu), tối đa 15.
+
+Agent giữ một tab ở trang danh sách tin nhắn và gọi JSON nội bộ của chính trang Etsy từ đó,
+không mở từng hội thoại, nên **không làm tin thành "đã đọc" trên Etsy**. Bật ở ô
+"Tin nhắn Etsy về CMS" trong cửa sổ agent, dán token.
+
 ## Cài đặt trên máy treo 24/7
 
 Tải `Track17-Agent-Setup-<version>.exe` ở

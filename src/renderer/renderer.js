@@ -3,9 +3,9 @@
 /** The control window: a form over config.json, a Start/Stop pair, and a log. */
 
 const fields = {
-  text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl', 'dailyRunTime'],
+  text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl', 'dailyRunTime', 'inboxToken'],
   number: ['batchSize', 'batchDelaySeconds', 'etsyPagesPerShop', 'etsyPageDelaySeconds'],
-  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled'],
+  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled', 'inboxEnabled'],
   select: ['lanes'],
 };
 
@@ -163,6 +163,12 @@ async function loadCsvStatus() {
 el('csv-run').addEventListener('click', async () => {
   await save();
   const result = await window.agent.csvRun();
+  appendLog(result.message);
+});
+
+el('inbox-run').addEventListener('click', async () => {
+  await save();
+  const result = await window.agent.inboxRun();
   appendLog(result.message);
 });
 

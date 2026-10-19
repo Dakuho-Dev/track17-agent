@@ -10,6 +10,7 @@ const { Tracker, MAX_PER_QUERY } = require('./tracker');
 const { EtsyReader } = require('./etsy');
 const { CsvDownloader, dueSlot, parseTimes, parseCsvTypes, vietnamNow } = require('./csv-download');
 const { ProfilePool } = require('./profile-pool');
+const { InboxReader } = require('./inbox');
 const { HidemyaccClient, guessProfile } = require('./hidemyacc');
 const updater = require('./updater');
 
@@ -35,8 +36,11 @@ let controlWindow = null;
 let tracker = null;
 let etsy = null;
 let csv = null;
+let inbox = null;
 /** Set while a CSV round is running — it has its own timer, apart from `running`. */
 let csvRunning = false;
+/** Set while an inbox round is running (src/inbox.js), on its own timer too. */
+let inboxRunning = false;
 
 /** Set while the loop is working, so Start cannot stack two loops. */
 let running = false;
@@ -365,6 +369,71 @@ function startCsvTimer() {
   setTimeout(() => tick().catch(() => {}), 15000);
 }
 
+// ------------------------------------------------------------ job 4: inbox
+
+/**
+ * Read every shop's Etsy inbox into the CMS and send the replies written there
+ * (src/inbox.js). Same shops and profiles as the other jobs, borrowed through
+ * the same pool; one shop after another.
+ */
+async function runInboxRound(reason) {
+  if (inboxRunning) return { ok: false, message: 'Đang có một lượt quét tin nhắn chạy' };
+  inboxRunning = true;
+  try {
+    const settings = config.load(app);
+    if (!settings.inboxToken) throw new Error('chưa điền token tin nhắn');
+    const plan = await new WrlClient(settings).etsyPlan();
+    const { rows } = await resolveProfiles(settings, plan.shops || []);
+    let sent = 0;
+    let threads = 0;
+    const failed = [];
+    for (const shop of rows) {
+      if (!shop.profileId) {
+        failed.push(`${shop.shopName} (chưa chọn profile)`);
+        continue;
+      }
+      try {
+        const result = await inbox.syncShop(shop.shopName, { settings, profileId: shop.profileId });
+        sent += result.sent;
+        threads += result.threads;
+      } catch (error) {
+        stats.errors += 1;
+        pushState();
+        failed.push(shop.shopName);
+        log(`${shop.shopName}: quét tin nhắn lỗi — ${error.message}`);
+      }
+    }
+    const summary =
+      `${rows.length - failed.length}/${rows.length} shop, đọc ${threads} hội thoại, gửi ${sent} câu trả lời` +
+      (failed.length ? `; lỗi: ${failed.join(', ')}` : '');
+    // A quiet round is the normal case every five minutes; only say something when there was work.
+    if (reason !== 'lịch' || threads || sent || failed.length) log(`Tin nhắn (${reason}): ${summary}.`);
+    return { ok: true, message: `Tin nhắn: ${summary}` };
+  } catch (error) {
+    log(`Quét tin nhắn lỗi: ${error.message}`);
+    return { ok: false, message: error.message };
+  } finally {
+    inboxRunning = false;
+  }
+}
+
+/** Every `inboxIntervalMinutes`, counted from the end of the last round. */
+function startInboxTimer() {
+  const next = () => {
+    const minutes = Math.max(2, Number(config.load(app).inboxIntervalMinutes) || 5);
+    setTimeout(tick, minutes * 60000);
+  };
+  const tick = async () => {
+    try {
+      const settings = config.load(app);
+      if (settings.inboxEnabled && settings.inboxToken && settings.baseUrl && settings.token) await runInboxRound('lịch');
+    } finally {
+      next();
+    }
+  };
+  setTimeout(tick, 30000);
+}
+
 // --------------------------------------------------------------------- loop
 
 /** "07:00" from settings, falling back to 07:00 when the field is empty or malformed. */
@@ -578,6 +647,8 @@ ipcMain.handle('csv:run', async () => {
   return { ok: true, message: 'Bắt đầu tải CSV — theo dõi ở nhật ký.' };
 });
 
+ipcMain.handle('inbox:run', () => runInboxRound('bấm tay'));
+
 /** What the CMS timetable says, for the window. */
 ipcMain.handle('csv:status', async () => {
   const settings = config.load(app);
@@ -631,12 +702,14 @@ if (!app.requestSingleInstanceLock()) {
     const pool = new ProfilePool();
     etsy = new EtsyReader(log, pool);
     csv = new CsvDownloader(log, pool);
+    inbox = new InboxReader(log, pool, app.getVersion());
     startCsvTimer();
+    startInboxTimer();
 
     // Watch for new releases and restart into them when nothing is in flight.
     // `running` is the whole definition of busy: while it is true a batch is
     // claimed from WrL or a shop's order pages are half-read.
-    updater.start({ log, isBusy: () => running || csvRunning });
+    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning });
 
     // Nobody is at the keyboard of a machine left running, so the app has to
     // start working by itself after a reboot, a crash restart, or the restart

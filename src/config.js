@@ -52,6 +52,17 @@ const DEFAULTS = {
   csvDownloadDir: path.join(os.homedir(), 'Downloads', 'Etsy CSV'),
   /** Timetable slots already run ("2026-10-07 08:00"), so a restart does not repeat one. */
   csvDoneSlots: [],
+  /**
+   * Read every shop's Etsy inbox into the CMS page "Tin nhắn" and send the
+   * replies written there (src/inbox.js). Off until the token is filled in.
+   */
+  inboxEnabled: false,
+  /** Matches ETSY_INBOX_AGENT_TOKEN on the CMS server. */
+  inboxToken: '',
+  /** Minutes between inbox rounds; each round reads every shop once. */
+  inboxIntervalMinutes: 5,
+  /** Inbox pages (20 conversations each) read per shop per round while everything on a page is new. */
+  inboxMaxPages: 5,
   /** Keep working through the queue on a timer instead of one batch at a time. */
   autoRun: false,
   /**
