@@ -91,8 +91,8 @@ class HidemyaccClient {
       // machine answers a bare 400 "Bad Request", nothing more specific.
       if (/lỗi 400/.test(error.message)) {
         throw new Error(
-          'Hidemyacc từ chối mở profile (400) — thường do profile đang được người khác mở trên máy khác. ' +
-            'Đợi họ đóng, hoặc chọn profile khác của shop này',
+          'Hidemyacc từ chối mở profile (400) — profile đang khởi động/đóng dở, hoặc đang được người khác mở trên ' +
+            'máy khác. Đợi họ đóng, hoặc chọn profile khác của shop này',
         );
       }
       // Measured 2026-10-08 on the 24/7 box: a profile opened by hand in the

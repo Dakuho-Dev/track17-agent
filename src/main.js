@@ -726,8 +726,9 @@ if (!app.requestSingleInstanceLock()) {
     trimLogFile();
     createControlWindow();
     tracker = new Tracker(log);
-    // One pool for both jobs, so neither closes a profile the other is using.
-    const pool = new ProfilePool();
+    // One pool for every job, so none closes a profile another is using or
+    // starts one another is starting (src/profile-pool.js).
+    const pool = new ProfilePool(log);
     etsy = new EtsyReader(log, pool);
     csv = new CsvDownloader(log, pool);
     inbox = new InboxReader(log, pool, app.getVersion());

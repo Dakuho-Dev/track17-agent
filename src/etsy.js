@@ -176,7 +176,8 @@ class EtsyReader {
     const failed = [];
     for (const { shopName, profileId } of entries) {
       try {
-        await hma.start(profileId);
+        // Through the pool, so it never races a job starting the same profile.
+        await this.pool.endpoint(hma, profileId);
         opened.push(shopName);
       } catch (error) {
         failed.push(`${shopName} (${error.message})`);
