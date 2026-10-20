@@ -19,6 +19,10 @@ const { signInScript } = require('./etsy');
  *                including message_order <offset>
  *   reply   POST /api/v3/ajax/member/conversations/<id>  (form: message,
  *                attachments, api_context) with the page's csrf_nonce
+ *   image   POST /api/v3/ajax/member/conversations/attachment-upload
+ *                (multipart, field "attachment") → image_id; the reply then
+ *                sends attachments={"0":id,…}, at most 3 (read from Etsy's
+ *                composer code 2026-10-19, not yet tried with a real send)
  *
  * None of these marks a conversation read on Etsy: the inbox page does that
  * with a separate tag change when a person opens a thread, and that is never
@@ -41,6 +45,8 @@ const TAB_MAX_AGE_MS = 30 * 60000;
 const THREADS_PER_ROUND = 15;
 /** Older-message calls per conversation per round (6 messages each). */
 const OLDER_CALLS_PER_THREAD = 10;
+/** Etsy's composer allows 3 attachments a message. */
+const MAX_IMAGES = 3;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** A short, uneven pause between Etsy calls, like a person clicking through. */
 const pause = () => sleep(1200 + Math.random() * 1800);
@@ -60,19 +66,53 @@ function plainText(html) {
 
 function imageOf(image) {
   if (!image || typeof image !== 'object') return null;
+  // Conversation images (seen 2026-10-19): { image_id, image_data: { url, sources: [{ width, url }] } },
+  // url being the full size and sources running full → 300 → 150 → 75.
+  const data = image.image_data;
+  if (data && typeof data === 'object') {
+    const sources = Array.isArray(data.sources) ? data.sources : [];
+    const small = sources.find((s) => s.width === 300) || sources.find((s) => s.width > 0) || null;
+    const full = data.url || sources[0]?.url;
+    if (full || small) return { url: small?.url || full, urlLarge: full || small.url };
+  }
   const url = image.url_170x135 || image.url_300x300 || image.url_570xN || image.url || image.image_url || image.src || image.url_fullxfull;
   const urlLarge = image.url_fullxfull || image.url_570xN || image.url || url;
-  return url ? { url, urlLarge } : null;
+  if (url) return { url, urlLarge };
+  // Any other shape: take whatever Etsy image links it carries.
+  const links = etsyImageLinks(image);
+  if (!links.length) return null;
+  const pick = (re) => links.find((link) => re.test(link));
+  return { url: pick(/_300x300\.|_170x135\.|_150x150\./) || links[0], urlLarge: pick(/_fullxfull\.|_570xN\./) || links[0] };
+}
+
+/** Every i.etsystatic.com link anywhere inside `value`. */
+function etsyImageLinks(value, out = [], depth = 0) {
+  if (depth > 6 || value == null) return out;
+  if (typeof value === 'string') {
+    if (/^https:\/\/i\.etsystatic\.com\//.test(value) && !out.includes(value)) out.push(value);
+  } else if (typeof value === 'object') {
+    for (const item of Object.values(value)) etsyImageLinks(item, out, depth + 1);
+  }
+  return out;
 }
 
 function toMessage(m) {
+  let images = (Array.isArray(m.images) ? m.images : []).map(imageOf).filter(Boolean);
+  // Etsy says there are images but none were in a shape read above: fall back
+  // to every image link on the message, so a photo from a customer is never
+  // silently dropped (an empty bubble on the CMS).
+  if (!images.length && m.has_images) {
+    images = etsyImageLinks({ images: m.images, attachments: m.attachments })
+      .filter((link) => !/_75x75\.|_150x150\./.test(link))
+      .map((link) => ({ url: link, urlLarge: link }));
+  }
   return {
     messageId: m.conversation_message_id,
     order: m.message_order,
     senderId: m.sender_id,
     isSystem: Boolean(m.is_system_message) || m.type === 'system',
     body: plainText(m.message),
-    images: (Array.isArray(m.images) ? m.images : []).map(imageOf).filter(Boolean),
+    images,
     sentAt: m.create_date,
   };
 }
@@ -209,7 +249,7 @@ class InboxReader {
     for (const item of need.slice(0, THREADS_PER_ROUND)) {
       await pause();
       try {
-        await this.readThread(api, page, shopName, item.conversationId, item.syncedOrder || 0);
+        await this.readThread(api, page, shopName, item.conversationId, item.syncedOrder || 0, item.oldestOrder || null);
         threads += 1;
       } catch (error) {
         this.log(`${shopName}: đọc hội thoại ${item.conversationId} lỗi — ${error.message}`);
@@ -218,8 +258,13 @@ class InboxReader {
     return { threads, conversations };
   }
 
-  /** New messages of one conversation, reading back until the ones the CMS already has. */
-  async readThread(api, page, shopName, conversationId, syncedOrder) {
+  /**
+   * Messages of one conversation the CMS does not have yet: first the new ones,
+   * reading back until the ones it already has (syncedOrder), then — for a long
+   * thread a past round could not finish — the history below the oldest one it
+   * has (oldestOrder). With `newestOnly` just the newest few (right after a send).
+   */
+  async readThread(api, page, shopName, conversationId, syncedOrder, oldestOrder, { newestOnly = false } = {}) {
     const data = await InboxReader.get(
       page,
       `/api/v3/ajax/bespoke/member/conversations/detail-view-data?conversation_id=${conversationId}&load_shop_convos=true`,
@@ -227,28 +272,65 @@ class InboxReader {
     const detail = data.detail || {};
     const byId = new Map();
     for (const m of detail.messages || []) byId.set(m.conversation_message_id, m);
+    const lowest = () => Math.min(...[...byId.values()].map((m) => m.message_order));
 
-    let oldest = Math.min(...[...byId.values()].map((m) => m.message_order), Infinity);
+    if (newestOnly || !byId.size) {
+      await api.post('messages', {
+        shopName,
+        conversationId,
+        receiptId: detail.receipt_id || null,
+        ...(newestOnly ? { caughtUp: false } : { caughtUp: true, complete: true }),
+        messages: [...byId.values()].map(toMessage),
+      });
+      return;
+    }
+
     let calls = 0;
-    while (oldest > syncedOrder + 1 && oldest > 1 && calls < OLDER_CALLS_PER_THREAD) {
+    let reachedStart = false;
+    /** One older-messages call ending at `offset`; returns the new lowest order, or null at the start. */
+    const readBefore = async (offset) => {
       await pause();
       const older = await InboxReader.get(
         page,
-        `/api/v3/ajax/member/conversations/detail/${conversationId}/message-list?offset=${oldest - 1}&fetch_older=true&load_shop_convos=true`,
+        `/api/v3/ajax/member/conversations/detail/${conversationId}/message-list?offset=${offset}&fetch_older=true&load_shop_convos=true`,
       );
       calls += 1;
-      const before = byId.size;
-      for (const m of older.messages || []) byId.set(m.conversation_message_id, m);
-      const next = Math.min(...[...byId.values()].map((m) => m.message_order));
-      if (byId.size === before || next >= oldest) break; // nothing older came back
+      const found = (older.messages || []).filter((m) => m.message_order <= offset);
+      for (const m of found) byId.set(m.conversation_message_id, m);
+      if (!found.length) return null; // nothing older came back
+      return Math.min(...found.map((m) => m.message_order));
+    };
+
+    // 1) the new messages, down to what the CMS has
+    let oldest = lowest();
+    const target = syncedOrder > 0 ? syncedOrder + 1 : 1;
+    while (oldest > target && oldest > 1 && calls < OLDER_CALLS_PER_THREAD) {
+      const next = await readBefore(oldest - 1);
+      if (next === null || next >= oldest) {
+        reachedStart = true;
+        break;
+      }
       oldest = next;
+    }
+    if (oldest <= 1) reachedStart = true;
+    const caughtUp = syncedOrder === 0 || reachedStart || oldest <= syncedOrder + 1;
+
+    // 2) the history still missing below the oldest message the CMS has
+    let low = caughtUp && syncedOrder > 0 && oldestOrder ? Math.min(oldest, oldestOrder) : oldest;
+    if (low <= 1) reachedStart = true;
+    while (caughtUp && !reachedStart && calls < OLDER_CALLS_PER_THREAD) {
+      const next = await readBefore(low - 1);
+      if (next === null || next >= low) reachedStart = true;
+      else low = next;
+      if (low <= 1) reachedStart = true;
     }
 
     await api.post('messages', {
       shopName,
       conversationId,
       receiptId: detail.receipt_id || null,
-      complete: !(oldest > syncedOrder + 1 && oldest > 1),
+      caughtUp,
+      complete: caughtUp && reachedStart,
       messages: [...byId.values()].map(toMessage),
     });
   }
@@ -267,14 +349,23 @@ class InboxReader {
     for (const reply of replies) {
       let outcome = 'unknown';
       let error = null;
+      let imageIds = [];
       try {
+        // Images first: until the message itself is posted nothing has reached
+        // the customer, so a failed upload is a plain "failed".
+        imageIds = await this.uploadImages(page, reply.images || []);
+      } catch (e) {
+        outcome = 'failed';
+        error = `không đưa được ảnh lên Etsy, tin chưa gửi: ${e.message}`;
+      }
+      if (outcome !== 'failed') try {
         const result = await page.evaluate(
-          async ({ conversationId, body }) => {
+          async ({ conversationId, body, attachments }) => {
             const csrf = document.querySelector('meta[name="csrf_nonce"]')?.content;
             if (!csrf) return { status: 0, text: 'không thấy csrf_nonce trên trang' };
             const form = new URLSearchParams();
             form.set('message', body);
-            form.set('attachments', '{}');
+            form.set('attachments', attachments);
             form.set('api_context', 'seller_conversations');
             form.set('message_source', '');
             const res = await fetch(`/api/v3/ajax/member/conversations/${conversationId}`, {
@@ -291,7 +382,12 @@ class InboxReader {
             });
             return { status: res.status, text: await res.text() };
           },
-          { conversationId: reply.conversationId, body: reply.body },
+          {
+            conversationId: reply.conversationId,
+            body: reply.body,
+            // Etsy's own composer sends JSON.stringify({...[id, id]}) → {"0":id,"1":id}.
+            attachments: JSON.stringify({ ...imageIds }),
+          },
         );
         if (result.status === 0) {
           outcome = 'failed';
@@ -311,9 +407,55 @@ class InboxReader {
       if (outcome === 'sent') sent += 1;
       else this.log(`${shopName}: câu trả lời #${reply.id} ${outcome === 'failed' ? 'bị Etsy từ chối' : 'chưa rõ đã gửi chưa'} — ${error}`);
       await pause();
-      await this.readThread(api, page, shopName, reply.conversationId, 0).catch(() => {});
+      await this.readThread(api, page, shopName, reply.conversationId, 0, null, { newestOnly: true }).catch(() => {});
     }
     return sent;
+  }
+
+  /**
+   * Put a reply's images (public URLs from the CMS) on Etsy the way its own
+   * composer does: one POST per file to attachment-upload, field "attachment",
+   * answered with an image_id that the message then lists. Returns the ids.
+   */
+  async uploadImages(page, urls) {
+    const ids = [];
+    for (const [i, url] of urls.slice(0, MAX_IMAGES).entries()) {
+      // Fetched here rather than in the page: the image host need not allow etsy.com.
+      const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      if (!res.ok) throw new Error(`tải ảnh ${i + 1} về lỗi ${res.status}`);
+      const type = (res.headers.get('content-type') || 'image/png').split(';')[0];
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const result = await page.evaluate(
+        async ({ base64, type, name }) => {
+          const csrf = document.querySelector('meta[name="csrf_nonce"]')?.content;
+          if (!csrf) return { status: 0, text: 'không thấy csrf_nonce trên trang' };
+          const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+          const form = new FormData();
+          form.append('attachment', new File([bytes], name, { type }));
+          const r = await fetch('/api/v3/ajax/member/conversations/attachment-upload', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'x-csrf-token': csrf, 'x-etsy-protection': '1', 'x-requested-with': 'XMLHttpRequest' },
+            body: form,
+          });
+          return { status: r.status, text: await r.text() };
+        },
+        { base64: buffer.toString('base64'), type, name: `screenshot-${Date.now()}-${i + 1}.${ext}` },
+      );
+      if (result.status < 200 || result.status >= 300) throw new Error(`Etsy trả ${result.status} khi tải ảnh ${i + 1}: ${result.text.slice(0, 300)}`);
+      let data;
+      try {
+        data = JSON.parse(result.text);
+      } catch {
+        throw new Error(`Etsy trả nội dung lạ khi tải ảnh ${i + 1}: ${result.text.slice(0, 300)}`);
+      }
+      const id = data.image_id ?? data.imageId ?? data.result?.image_id;
+      if (!id) throw new Error(`Etsy không trả image_id cho ảnh ${i + 1}: ${result.text.slice(0, 300)}`);
+      ids.push(id);
+      await pause();
+    }
+    return ids;
   }
 }
 

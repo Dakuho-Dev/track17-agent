@@ -11,7 +11,7 @@ const { EtsyReader } = require('./etsy');
 const { CsvDownloader, dueSlot, parseTimes, parseCsvTypes, vietnamNow } = require('./csv-download');
 const { ProfilePool } = require('./profile-pool');
 const { InboxReader } = require('./inbox');
-const { HidemyaccClient, guessProfile } = require('./hidemyacc');
+const { HidemyaccClient, guessProfile, fold } = require('./hidemyacc');
 const updater = require('./updater');
 
 /**
@@ -372,6 +372,27 @@ function startCsvTimer() {
 // ------------------------------------------------------------ job 4: inbox
 
 /**
+ * The shops whose inbox is read, without asking WrL: one per Hidemyacc
+ * profile named "Wakeup 24/7 - <shop>" (the agent's own profile of each shop),
+ * plus any shop paired with a profile by hand in the window. A hand pairing
+ * wins, and its spelling of the shop name is kept (the CMS keys on it).
+ */
+async function inboxShops(settings) {
+  const profiles = await new HidemyaccClient(settings).profiles();
+  const known = new Set(profiles.map((profile) => profile.id));
+  const chosen = Object.entries(settings.hmaProfiles || {}).filter(([, id]) => known.has(id));
+  const rows = chosen.map(([shopName, profileId]) => ({ shopName, profileId }));
+  const taken = new Set(rows.map((row) => fold(row.shopName)));
+  for (const profile of profiles) {
+    const match = /^\s*wake\s*up\s*24\s*\/\s*7\s*-\s*(.+?)\s*$/i.exec(profile.name || '');
+    if (!match || taken.has(fold(match[1]))) continue;
+    taken.add(fold(match[1]));
+    rows.push({ shopName: match[1], profileId: profile.id });
+  }
+  return rows.sort((a, b) => a.shopName.localeCompare(b.shopName));
+}
+
+/**
  * Read every shop's Etsy inbox into the CMS and send the replies written there
  * (src/inbox.js). Same shops and profiles as the other jobs, borrowed through
  * the same pool; one shop after another.
@@ -382,8 +403,8 @@ async function runInboxRound(reason) {
   try {
     const settings = config.load(app);
     if (!settings.inboxToken) throw new Error('chưa điền token tin nhắn');
-    const plan = await new WrlClient(settings).etsyPlan();
-    const { rows } = await resolveProfiles(settings, plan.shops || []);
+    const rows = await inboxShops(settings);
+    if (!rows.length) throw new Error('không thấy profile "Wakeup 24/7 - <shop>" nào trong Hidemyacc');
     let sent = 0;
     let threads = 0;
     const failed = [];
@@ -627,8 +648,15 @@ ipcMain.handle('browser:show', async () => {
  */
 ipcMain.handle('hma:mapping', async () => {
   const settings = config.load(app);
-  const plan = await new WrlClient(settings).etsyPlan();
-  const { rows, profiles } = await resolveProfiles(settings, plan.shops || []);
+  let shops;
+  try {
+    shops = (await new WrlClient(settings).etsyPlan()).shops || [];
+  } catch (error) {
+    // WrL down: still show the shops the inbox reads, so pairing keeps working.
+    log(`Bảng profile: WrL lỗi (${error.message}) — hiện các shop theo profile Hidemyacc.`);
+    shops = (await inboxShops(settings)).map((row) => ({ shopName: row.shopName, waiting: 0 }));
+  }
+  const { rows, profiles } = await resolveProfiles(settings, shops);
   return { shops: rows, profiles };
 });
 

@@ -112,6 +112,12 @@ Agent giữ một tab ở trang danh sách tin nhắn và gọi JSON nội bộ 
 không mở từng hội thoại, nên **không làm tin thành "đã đọc" trên Etsy**. Bật ở ô
 "Tin nhắn Etsy về CMS" trong cửa sổ agent, dán token.
 
+Danh sách shop của hộp thư **không hỏi WrL** (từ 1.5.1): mỗi profile Hidemyacc tên
+"Wakeup 24/7 - <shop>" là một shop, cộng các shop đã ghép profile bằng tay trong bảng. WrL
+có sập thì tin nhắn vẫn chạy. Câu trả lời có thể kèm tối đa 3 ảnh (dán trên CMS): agent tải
+ảnh về, đưa lên Etsy (`attachment-upload`) rồi gửi kèm tin; ảnh lỗi thì tin chưa gửi, báo
+"Gửi lỗi". Hội thoại dài hơn 66 tin được đọc nốt phần cũ ở các lượt sau.
+
 ## Cài đặt trên máy treo 24/7
 
 Tải `Track17-Agent-Setup-<version>.exe` ở
