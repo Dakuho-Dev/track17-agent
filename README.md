@@ -118,6 +118,11 @@ có sập thì tin nhắn vẫn chạy. Câu trả lời có thể kèm tối đ
 ảnh về, đưa lên Etsy (`attachment-upload`) rồi gửi kèm tin; ảnh lỗi thì tin chưa gửi, báo
 "Gửi lỗi". Hội thoại dài hơn 66 tin được đọc nốt phần cũ ở các lượt sau.
 
+Mỗi lần đọc hội thoại, agent gửi kèm **đơn hàng** của hội thoại (khung "Ordered … / Ship in … /
+Ship To" bên phải trang tin nhắn Etsy, từ `order_details` của `detail-view-data`): mã đơn, ngày
+đặt, sản phẩm, trạng thái giao, người nhận (tên + thành phố; không lấy số nhà, zip, email).
+Từ 1.5.4.
+
 ## Cài đặt trên máy treo 24/7
 
 Tải `Track17-Agent-Setup-<version>.exe` ở

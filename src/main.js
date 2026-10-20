@@ -453,6 +453,9 @@ async function runReplyLane() {
   try {
     const settings = config.load(app);
     const waiting = await inbox.pendingShops(settings);
+    // The CMS answered: an outage reported earlier is over.
+    if (replyLaneDown) log('Gửi câu trả lời: CMS đã trả lời lại bình thường.');
+    replyLaneDown = null;
     if (!waiting.length) return;
     const rows = await inboxShops(settings);
     for (const { shopName, queued } of waiting) {
@@ -466,11 +469,27 @@ async function runReplyLane() {
       }
     }
   } catch (error) {
-    // Quiet: this runs every few seconds; the inbox round still sends and reports.
-    if (!/fetch failed|không gọi được CMS/.test(error.message)) log(`Gửi câu trả lời: ${error.message}`);
+    // This runs every few seconds: say an outage once (and its end), not on every tick.
+    const short = shortError(error.message);
+    if (replyLaneDown !== short) log(`Gửi câu trả lời: ${short} — sẽ thử lại mỗi ${REPLY_POLL_MS / 1000} giây, chỉ báo lại khi CMS chạy lại.`);
+    replyLaneDown = short;
   } finally {
     replyRunning = false;
   }
+}
+
+/** The last reply-lane error, while the CMS keeps failing (null when fine). */
+let replyLaneDown = null;
+
+/** "CMS trả lỗi 502: <html>…nginx…" → "CMS trả lỗi 502 (Bad Gateway)": one line for the log. */
+function shortError(message) {
+  const text = String(message || '');
+  const status = /lỗi (\d{3})/.exec(text);
+  if (status && /<html/i.test(text)) {
+    const title = /<title>\s*\d*\s*([^<]*)<\/title>/i.exec(text);
+    return `CMS trả lỗi ${status[1]}${title && title[1].trim() ? ` (${title[1].trim()})` : ''} — máy chủ CMS đang tắt hoặc khởi động lại`;
+  }
+  return text.slice(0, 200);
 }
 
 function startReplyTimer() {

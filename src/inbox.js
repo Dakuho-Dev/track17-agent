@@ -96,6 +96,78 @@ function etsyImageLinks(value, out = [], depth = 0) {
   return out;
 }
 
+/**
+ * The order a conversation is about — what Etsy shows on the right of its
+ * messages page ("Ordered … / Ship in … / Ship To"). It comes with
+ * detail-view-data, at the top level (read from Etsy's own code 2026-10-20):
+ *
+ *   order_details.order_info            order_id, order_date, order_url, is_shipped,
+ *                                       order_transactions[{ title, listing_id, sku, image_url,
+ *                                       item_price, quantity, variations[{ variation, value }] }],
+ *                                       to_address{ name, city, state, country, … }, …
+ *   order_details.order_shipping_status shipping_method_name, estimated_delivery_date,
+ *                                       tracking_status, carrier_name, tracking_number, tracking_url, …
+ *
+ * Returns null when the conversation has no order. Street lines, zip and the
+ * buyer's email are left out — the CMS only needs to say which order and where it is.
+ */
+function orderOf(data) {
+  const details = pick(data, 'order_details', 'orderDetails');
+  const info = pick(details, 'order_info', 'orderInfo');
+  const orderId = Number(pick(info, 'order_id', 'orderId'));
+  if (!info || !(orderId > 0)) return null;
+  const status = pick(details, 'order_shipping_status', 'orderShippingStatus');
+  const address = pick(info, 'to_address', 'toAddress');
+  const transactions = pick(info, 'order_transactions', 'orderTransactions');
+  return {
+    orderId,
+    orderDate: pick(info, 'order_date', 'orderDate'),
+    orderUrl: pick(info, 'order_url', 'orderUrl'),
+    isShipped: Boolean(pick(info, 'is_shipped', 'isShipped')),
+    isDigital: Boolean(pick(info, 'is_digital_delivery', 'isDigitalDelivery')),
+    isGift: Boolean(pick(info, 'is_gift', 'isGift')),
+    shippingPrice: pick(info, 'shipping_price', 'shippingPrice'),
+    items: (Array.isArray(transactions) ? transactions : []).map((t) => ({
+      title: plainText(pick(t, 'title')),
+      listingId: pick(t, 'listing_id', 'listingId'),
+      sku: pick(t, 'sku'),
+      imageUrl: pick(t, 'image_url', 'imageUrl'),
+      price: pick(t, 'item_price', 'itemPrice'),
+      quantity: pick(t, 'quantity'),
+      variations: (Array.isArray(pick(t, 'variations')) ? pick(t, 'variations') : []).map((v) => ({
+        name: plainText(pick(v, 'variation')),
+        value: plainText(pick(v, 'value')),
+      })),
+    })),
+    shipping: status
+      ? {
+          method: pick(status, 'shipping_method_name', 'shippingMethodName'),
+          estimatedDelivery: pick(status, 'estimated_delivery_date', 'estimatedDeliveryDate'),
+          trackingStatus: pick(status, 'tracking_status', 'trackingStatus'),
+          carrier: pick(status, 'carrier_name', 'carrierName'),
+          trackingNumber: pick(status, 'tracking_number', 'trackingNumber'),
+          trackingUrl: pick(status, 'tracking_url', 'trackingUrl'),
+          overdueStatus: pick(status, 'overdue_status', 'overdueStatus'),
+        }
+      : null,
+    shipTo: address
+      ? {
+          name: pick(address, 'name'),
+          city: pick(address, 'city'),
+          state: pick(address, 'state'),
+          country: pick(address, 'country'),
+        }
+      : null,
+  };
+}
+
+/** The first of `keys` present on `obj` (Etsy's JSON is snake_case; camelCase just in case). */
+function pick(obj, ...keys) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  for (const key of keys) if (obj[key] !== undefined && obj[key] !== null) return obj[key];
+  return undefined;
+}
+
 function toMessage(m) {
   let images = (Array.isArray(m.images) ? m.images : []).map(imageOf).filter(Boolean);
   // Etsy says there are images but none were in a shape read above: fall back
@@ -340,6 +412,9 @@ class InboxReader {
         shopName,
         conversationId,
         receiptId: detail.receipt_id || null,
+        // The order panel of this conversation (null: none) — every read refreshes it.
+        orderChecked: true,
+        order: orderOf(data),
         ...(newestOnly ? { caughtUp: false } : { caughtUp: true, complete: true }),
         messages: [...byId.values()].map(toMessage),
       });
@@ -390,6 +465,9 @@ class InboxReader {
       shopName,
       conversationId,
       receiptId: detail.receipt_id || null,
+      // The order panel of this conversation (null: none) — every read refreshes it.
+      orderChecked: true,
+      order: orderOf(data),
       caughtUp,
       complete: caughtUp && reachedStart,
       messages: [...byId.values()].map(toMessage),
