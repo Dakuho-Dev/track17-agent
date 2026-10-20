@@ -151,6 +151,10 @@ class InboxReader {
     this.version = version;
     /** profileId → when its inbox tab was last loaded. */
     this.loadedAt = new Map();
+    /** shopName → the job running in its inbox tab (see `exclusive`). */
+    this.busy = new Map();
+    /** Shops whose replies should go out mid-round, between two conversations. */
+    this.urgent = new Set();
   }
 
   /**
@@ -162,18 +166,63 @@ class InboxReader {
     if (!api.base || !api.token) throw new Error('chưa điền địa chỉ CMS hoặc token tin nhắn');
 
     try {
-      return await this.pool.use(settings, profileId, async (browser, profile) => {
+      return await this.exclusive(shopName, () => this.pool.use(settings, profileId, async (browser, profile) => {
         const page = await this.inboxTab(browser, profileId);
         const state = await page.evaluate(signInScript()).catch((error) => ({ signedIn: false, reason: error.message }));
         if (!state.signedIn) throw new Error(`profile "${profile.name}" chưa đăng nhập Etsy (${state.reason})`);
 
-        const sent = await this.sendReplies(api, page, shopName);
-        const { threads, conversations } = await this.readInbox(api, page, shopName, settings);
+        this.urgent.delete(shopName);
+        let sent = await this.sendReplies(api, page, shopName);
+        const { threads, conversations, sentMidway } = await this.readInbox(api, page, shopName, settings);
+        sent += sentMidway;
         return { sent, threads, conversations };
-      });
+      }));
     } catch (error) {
       await api.post('sync', { shopName, agentVersion: this.version, error: error.message }).catch(() => {});
       throw error;
+    }
+  }
+
+  /** Which shops have replies waiting on the CMS — one cheap call, asked every few seconds. */
+  async pendingShops(settings) {
+    const api = new InboxApi(settings);
+    if (!api.base || !api.token) return [];
+    const { shops = [] } = await api.post('replies/pending', {});
+    return shops;
+  }
+
+  /**
+   * Send one shop's waiting replies now, without waiting for the inbox round.
+   *
+   * If the round is inside this very shop, it is asked to send between two
+   * conversations (`urgent`), so a reply never waits for a whole shop's read.
+   */
+  async sendNow(shopName, { settings, profileId }) {
+    const api = new InboxApi(settings);
+    if (!api.base || !api.token) return 0;
+    if (this.busy.has(shopName)) {
+      this.urgent.add(shopName);
+      return 0;
+    }
+    return this.exclusive(shopName, () =>
+      this.pool.use(settings, profileId, async (browser, profile) => {
+        const page = await this.inboxTab(browser, profileId);
+        const state = await page.evaluate(signInScript()).catch((error) => ({ signedIn: false, reason: error.message }));
+        if (!state.signedIn) throw new Error(`profile "${profile.name}" chưa đăng nhập Etsy (${state.reason})`);
+        return this.sendReplies(api, page, shopName);
+      }),
+    );
+  }
+
+  /** One job at a time in a shop's inbox tab (the round and the quick send share it). */
+  async exclusive(shopName, work) {
+    while (this.busy.has(shopName)) await this.busy.get(shopName).catch(() => {});
+    const running = work();
+    this.busy.set(shopName, running);
+    try {
+      return await running;
+    } finally {
+      if (this.busy.get(shopName) === running) this.busy.delete(shopName);
     }
   }
 
@@ -246,8 +295,19 @@ class InboxReader {
     }
 
     let threads = 0;
+    let sentMidway = 0;
+    // A reply written while this shop is being read goes out between two conversations.
+    const sendIfAsked = async () => {
+      if (!this.urgent.delete(shopName)) return;
+      sentMidway += await this.sendReplies(api, page, shopName).catch((error) => {
+        this.log(`${shopName}: gửi câu trả lời giữa lượt lỗi — ${error.message}`);
+        return 0;
+      });
+    };
+    await sendIfAsked();
     for (const item of need.slice(0, THREADS_PER_ROUND)) {
       await pause();
+      await sendIfAsked();
       try {
         await this.readThread(api, page, shopName, item.conversationId, item.syncedOrder || 0, item.oldestOrder || null);
         threads += 1;
@@ -255,7 +315,8 @@ class InboxReader {
         this.log(`${shopName}: đọc hội thoại ${item.conversationId} lỗi — ${error.message}`);
       }
     }
-    return { threads, conversations };
+    await sendIfAsked();
+    return { threads, conversations, sentMidway };
   }
 
   /**
@@ -325,7 +386,7 @@ class InboxReader {
       if (low <= 1) reachedStart = true;
     }
 
-    await api.post('messages', {
+    const answer = await api.post('messages', {
       shopName,
       conversationId,
       receiptId: detail.receipt_id || null,
@@ -333,6 +394,10 @@ class InboxReader {
       complete: caughtUp && reachedStart,
       messages: [...byId.values()].map(toMessage),
     });
+    // The CMS keeps the rest of a thread when one message will not save; say which.
+    for (const item of answer.skipped || []) {
+      this.log(`${shopName}: hội thoại ${conversationId}, CMS không lưu được tin ${item.messageId} — ${item.error}`);
+    }
   }
 
   /**

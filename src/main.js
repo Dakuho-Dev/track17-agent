@@ -438,6 +438,53 @@ async function runInboxRound(reason) {
   }
 }
 
+/**
+ * The quick lane for replies: every REPLY_POLL_MS ask the CMS which shops have
+ * replies waiting (one cheap call) and send them right away, instead of
+ * leaving them for the next inbox round — that one comes every few minutes and
+ * walks the shops one by one, so a reply could wait five minutes and more.
+ */
+const REPLY_POLL_MS = 15000;
+let replyRunning = false;
+
+async function runReplyLane() {
+  if (replyRunning) return;
+  replyRunning = true;
+  try {
+    const settings = config.load(app);
+    const waiting = await inbox.pendingShops(settings);
+    if (!waiting.length) return;
+    const rows = await inboxShops(settings);
+    for (const { shopName, queued } of waiting) {
+      const shop = rows.find((row) => fold(row.shopName) === fold(shopName));
+      if (!shop?.profileId) continue; // the round reports the missing profile
+      try {
+        const sent = await inbox.sendNow(shop.shopName, { settings, profileId: shop.profileId });
+        if (sent) log(`${shop.shopName}: đã gửi ${sent}/${queued} câu trả lời từ CMS.`);
+      } catch (error) {
+        log(`${shop.shopName}: gửi câu trả lời lỗi — ${error.message}`);
+      }
+    }
+  } catch (error) {
+    // Quiet: this runs every few seconds; the inbox round still sends and reports.
+    if (!/fetch failed|không gọi được CMS/.test(error.message)) log(`Gửi câu trả lời: ${error.message}`);
+  } finally {
+    replyRunning = false;
+  }
+}
+
+function startReplyTimer() {
+  const tick = async () => {
+    try {
+      const settings = config.load(app);
+      if (settings.inboxEnabled && settings.inboxToken) await runReplyLane();
+    } finally {
+      setTimeout(tick, REPLY_POLL_MS);
+    }
+  };
+  setTimeout(tick, 20000);
+}
+
 /** Every `inboxIntervalMinutes`, counted from the end of the last round. */
 function startInboxTimer() {
   const next = () => {
@@ -734,11 +781,12 @@ if (!app.requestSingleInstanceLock()) {
     inbox = new InboxReader(log, pool, app.getVersion());
     startCsvTimer();
     startInboxTimer();
+    startReplyTimer();
 
     // Watch for new releases and restart into them when nothing is in flight.
     // `running` is the whole definition of busy: while it is true a batch is
     // claimed from WrL or a shop's order pages are half-read.
-    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning });
+    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning || replyRunning });
 
     // Nobody is at the keyboard of a machine left running, so the app has to
     // start working by itself after a reboot, a crash restart, or the restart
