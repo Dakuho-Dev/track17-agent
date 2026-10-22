@@ -183,6 +183,9 @@ function toMessage(m) {
     order: m.message_order,
     senderId: m.sender_id,
     isSystem: Boolean(m.is_system_message) || m.type === 'system',
+    // Etsy's own flags: its auto-reply ("outside of my normal hours") comes as 146, a typed message as 128 (2026-10-19).
+    // The CMS uses them to tell an auto-reply from a real answer.
+    flags: m.message_flags,
     body: plainText(m.message),
     images,
     sentAt: m.create_date,
