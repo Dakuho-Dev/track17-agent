@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('agent', {
   csvRun: () => ipcRenderer.invoke('csv:run'),
   csvStatus: () => ipcRenderer.invoke('csv:status'),
   inboxRun: () => ipcRenderer.invoke('inbox:run'),
+  lastMileRun: () => ipcRenderer.invoke('lastmile:run'),
   onLog: (handler) => ipcRenderer.on('agent:log', (_event, line) => handler(line)),
   onState: (handler) => ipcRenderer.on('agent:state', (_event, state) => handler(state)),
 });

@@ -129,7 +129,7 @@ async function runOnce() {
   stats.looked += batch.count;
   pushState();
 
-  const { results, via } = await tracker.lookup(batch.numbers, {
+  const { results, via } = await lookupSerial(batch.numbers, {
     timeoutMs: (settings.lookupTimeoutSeconds || 60) * 1000,
   });
 
@@ -160,6 +160,107 @@ async function runOnce() {
   );
 
   return { done: false, remaining: batch.remaining };
+}
+
+/**
+ * The 17track window serves two lanes (statuses for WrL, last miles for the CMS),
+ * so lookups queue up here instead of typing into the same box at once.
+ */
+let trackerQueue = Promise.resolve();
+function lookupSerial(numbers, options) {
+  const run = trackerQueue.then(() => tracker.lookup(numbers, options));
+  trackerQueue = run.catch(() => {});
+  return run;
+}
+
+// ------------------------------------------------------- lane 1b: last mile
+
+/**
+ * Factories in China hand over only the first-mile number (Yanwen UL…YP,
+ * YunExpress YT…) and the last-mile one late or never — but 17track already
+ * knows it: `misc_info.local_number` in the same response (src/status.js).
+ * The CMS keeps those orders under "Chờ mã chặng cuối"; this lane looks their
+ * first-mile numbers up and hands back the last mile, which becomes the number
+ * pushed to Etsy (Sếp, 21/10/2026). The CMS counts the CN waiting days from the
+ * day the last mile appeared.
+ */
+let lastMileRunning = false;
+
+async function cmsAgentCall(settings, path, body) {
+  const base = String(settings.cmsApiUrl || '').replace(/\/$/, '');
+  const res = await fetch(`${base}/fulfillment-tracking/agent/${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-agent-token': String(settings.inboxToken || '').trim() },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  });
+  const text = await res.text();
+  if (res.status === 401) throw new Error('CMS từ chối token agent (401) — kiểm tra ô "Token tin nhắn"');
+  if (!res.ok) throw new Error(`CMS trả lỗi ${res.status}: ${text.slice(0, 200)}`);
+  return text ? JSON.parse(text) : {};
+}
+
+async function runLastMileRound(reason) {
+  if (lastMileRunning) return { ok: false, message: 'Đang có một lượt tra mã chặng cuối' };
+  lastMileRunning = true;
+  try {
+    const settings = config.load(app);
+    if (!settings.cmsApiUrl || !settings.inboxToken) throw new Error('chưa điền địa chỉ CMS hoặc token agent');
+    const maxBatches = Math.max(1, Number(settings.lastMileBatchesPerRound) || 10);
+    let looked = 0;
+    let found = 0;
+    let updated = 0;
+    let waiting = 0;
+    for (let n = 0; n < maxBatches; n += 1) {
+      const claim = await cmsAgentCall(settings, 'last-mile/claim', { limit: MAX_PER_QUERY });
+      waiting = claim.waiting || 0;
+      const numbers = claim.numbers || [];
+      if (!numbers.length) break;
+      if (n) await sleep((settings.batchDelaySeconds || 25) * 1000);
+      const { results } = await lookupSerial(numbers, { timeoutMs: (settings.lookupTimeoutSeconds || 60) * 1000 });
+      looked += numbers.length;
+      const payload = results.map((r) => ({
+        firstMileNumber: r.trackingNumber,
+        lastMileNumber: r.lastMileNumber || null,
+        lastMileCarrier: r.lastMileCarrier || null,
+        lastMileSince: r.lastMileSince || null,
+        status: r.status || null,
+        statusText: r.statusText || null,
+        lastEvent: r.lastEvent || null,
+        lastEventAt: r.lastEventAt || null,
+      }));
+      if (payload.length) {
+        const applied = await cmsAgentCall(settings, 'last-mile/results', { results: payload });
+        found += applied.found || 0;
+        updated += applied.updated || 0;
+      }
+    }
+    const summary = `tra ${looked} mã chặng đầu, ${found} mã có chặng cuối, ${updated} đơn có mã để đẩy (còn ${waiting} đơn chờ trên CMS)`;
+    if (reason !== 'lịch' || looked) log(`Mã chặng cuối (${reason}): ${summary}.`);
+    return { ok: true, message: `Mã chặng cuối: ${summary}` };
+  } catch (error) {
+    log(`Tra mã chặng cuối lỗi: ${error.message}`);
+    return { ok: false, message: error.message };
+  } finally {
+    lastMileRunning = false;
+  }
+}
+
+/** Every `lastMileIntervalHours`; the CMS itself spaces re-checks of one number (6 h). */
+function startLastMileTimer() {
+  const next = () => {
+    const hours = Math.max(0.5, Number(config.load(app).lastMileIntervalHours) || 3);
+    setTimeout(tick, hours * 3600000);
+  };
+  const tick = async () => {
+    try {
+      const settings = config.load(app);
+      if (settings.lastMileEnabled && settings.inboxToken && settings.cmsApiUrl) await runLastMileRound('lịch');
+    } finally {
+      next();
+    }
+  };
+  setTimeout(tick, 90000);
 }
 
 // ------------------------------------------------------------- lane 2: Etsy
@@ -742,6 +843,7 @@ ipcMain.handle('csv:run', async () => {
 });
 
 ipcMain.handle('inbox:run', () => runInboxRound('bấm tay'));
+ipcMain.handle('lastmile:run', () => runLastMileRound('bấm tay'));
 
 /** What the CMS timetable says, for the window. */
 ipcMain.handle('csv:status', async () => {
@@ -800,12 +902,13 @@ if (!app.requestSingleInstanceLock()) {
     inbox = new InboxReader(log, pool, app.getVersion());
     startCsvTimer();
     startInboxTimer();
+    startLastMileTimer();
     startReplyTimer();
 
     // Watch for new releases and restart into them when nothing is in flight.
     // `running` is the whole definition of busy: while it is true a batch is
     // claimed from WrL or a shop's order pages are half-read.
-    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning || replyRunning });
+    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning || replyRunning || lastMileRunning });
 
     // Nobody is at the keyboard of a machine left running, so the app has to
     // start working by itself after a reboot, a crash restart, or the restart

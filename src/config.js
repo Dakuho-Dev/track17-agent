@@ -63,6 +63,16 @@ const DEFAULTS = {
   inboxIntervalMinutes: 5,
   /** Inbox pages (20 conversations each) read per shop per round while everything on a page is new. */
   inboxMaxPages: 5,
+  /**
+   * Look up the first-mile numbers the CMS has under "Chờ mã chặng cuối" on
+   * 17track and hand back the last mile (src/main.js, lane 1b). Uses the CMS
+   * address and the agent token of the inbox section.
+   */
+  lastMileEnabled: true,
+  /** Hours between last-mile rounds. */
+  lastMileIntervalHours: 3,
+  /** At most this many batches of 40 per round. */
+  lastMileBatchesPerRound: 10,
   /** Keep working through the queue on a timer instead of one batch at a time. */
   autoRun: false,
   /**

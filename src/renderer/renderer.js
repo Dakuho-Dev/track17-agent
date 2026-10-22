@@ -5,7 +5,7 @@
 const fields = {
   text: ['baseUrl', 'token', 'hmaUrl', 'csvDownloadDir', 'cmsApiUrl', 'dailyRunTime', 'inboxToken'],
   number: ['batchSize', 'batchDelaySeconds', 'etsyPagesPerShop', 'etsyPageDelaySeconds'],
-  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled', 'inboxEnabled'],
+  check: ['autoRun', 'showBrowser', 'hmaCloseAfterRead', 'csvEnabled', 'inboxEnabled', 'lastMileEnabled'],
   select: ['lanes'],
 };
 
@@ -163,6 +163,12 @@ async function loadCsvStatus() {
 el('csv-run').addEventListener('click', async () => {
   await save();
   const result = await window.agent.csvRun();
+  appendLog(result.message);
+});
+
+el('lastmile-run').addEventListener('click', async () => {
+  await save();
+  const result = await window.agent.lastMileRun();
   appendLog(result.message);
 });
 

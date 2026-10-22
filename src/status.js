@@ -125,6 +125,27 @@ function fromApiEntry(entry) {
     null;
   result.carrier = firstString(provider && provider.name, provider && provider.alias);
 
+  // The "More info" box on the page (Last-mile Carrier / Last-mile Tracking Number)
+  // is `misc_info` in this same response — read on 2026-10-21 for Yanwen
+  // UL588363235YP: { local_number: "4205960292…", local_provider: "USPS" }.
+  const misc = detail && detail.misc_info && typeof detail.misc_info === 'object' ? detail.misc_info : null;
+  const lastMile = misc ? firstString(misc.local_number) : null;
+  if (lastMile && lastMile.toUpperCase() !== trackingNumber.toUpperCase()) {
+    result.lastMileNumber = lastMile.replace(/\s+/g, '');
+    result.lastMileCarrier = firstString(misc.local_provider);
+    // When the last mile showed up: the first event in the destination country
+    // ("Shipping Label Created, USPS Awaiting Item" in Los Angeles, for example).
+    const country =
+      detail.shipping_info && detail.shipping_info.recipient_address && detail.shipping_info.recipient_address.country;
+    const events = ((detail.tracking && detail.tracking.providers) || []).flatMap((p) => (p && p.events) || []);
+    const local = events
+      .filter((e) => e && e.address && country && e.address.country === country)
+      .map((e) => eventTime(firstString(e.time_utc, e.time_iso)))
+      .filter(Boolean)
+      .sort();
+    result.lastMileSince = local[0] || null;
+  }
+
   // The registration echo (`code: 100`) carries a number and nothing else —
   // posting that back would be claiming an answer we do not have.
   if (!result.status && !result.statusText && !result.lastEvent) return null;
