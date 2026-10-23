@@ -118,6 +118,23 @@ có sập thì tin nhắn vẫn chạy. Câu trả lời có thể kèm tối đ
 ảnh về, đưa lên Etsy (`attachment-upload`) rồi gửi kèm tin; ảnh lỗi thì tin chưa gửi, báo
 "Gửi lỗi". Hội thoại dài hơn 66 tin được đọc nốt phần cũ ở các lượt sau.
 
+**Bốn luật giữ ở code (từ 1.6.3, `src/inbox.js`), để hạn chế rủi ro với Điều khoản của Etsy:**
+
+1. **Chỉ hộp thư của chính shop, chậm.** Tài khoản Etsy đang đăng nhập trong profile phải là user
+   CMS đã biết của shop — khác thì CMS từ chối (409), agent không đọc/gửi gì cho shop đó. Nghỉ
+   2–6 giây giữa các lần gọi (thỉnh thoảng 8–20 giây), tối đa 45 lần gọi Etsy mỗi shop mỗi lượt,
+   lượt cách nhau 80–140 % khoảng đặt, thứ tự shop xáo mỗi lượt, "Order help requests" 3 lượt
+   đọc một lần.
+2. **Không mở hội thoại, không đổi trạng thái đã đọc.** Agent dùng một tab riêng (đánh dấu
+   `window.name`) chỉ ở trang danh sách; không dùng/không chuyển trang tab người khác mở. Mọi lệnh
+   gọi Etsy đi qua danh sách cho phép: đọc danh sách, đọc tin, tải ảnh, gửi trả lời — không có
+   lệnh đổi thẻ, đánh dấu đã đọc/chưa đọc, lưu trữ, xoá.
+3. **Mỗi câu gửi đúng một lần, do người viết.** Lượt nhận được ghi xuống `inbox-sent.json` (thư
+   mục dữ liệu app) *trước* khi gửi — khởi động lại cũng không gửi lần hai. Câu không có người viết
+   trên CMS bị từ chối.
+4. **Không gửi tin chủ động.** Chỉ trả lời vào hội thoại có sẵn mà khách đã từng nhắn (CMS kiểm
+   cả lúc viết và lúc giao cho agent); agent không có lệnh tạo hội thoại mới.
+
 Mỗi lần đọc hội thoại, agent gửi kèm **đơn hàng** của hội thoại (khung "Ordered … / Ship in … /
 Ship To" bên phải trang tin nhắn Etsy, từ `order_details` của `detail-view-data`): mã đơn, ngày
 đặt, sản phẩm, trạng thái giao, người nhận (tên + thành phố; không lấy số nhà, zip, email).

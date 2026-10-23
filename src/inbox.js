@@ -38,20 +38,120 @@ const { signInScript } = require('./etsy');
  * a person checks Etsy before sending again.
  */
 
+/*
+ * Four rules this file keeps, each enforced in code rather than left to habit:
+ *
+ *   1. Only the shop's own inbox, in its own profile and sign-in, slowly.
+ *      The signed-in Etsy user must be the one the CMS knows for this shop
+ *      (`checkIdentity`), calls are spaced 2–6 s with the odd longer break,
+ *      and a shop gets at most ETSY_CALLS_PER_SHOP_ROUND calls a round.
+ *   2. Never open a conversation, never change what Etsy shows as read.
+ *      The agent works in a tab of its own on the inbox list (`inboxTab`), and
+ *      every Etsy call goes through an allow-list (`assertAllowed`): reading the
+ *      list and a thread's JSON, uploading an image, posting a reply. Nothing
+ *      that tags, marks read/unread, archives or deletes can be called.
+ *   3. Each reply is sent exactly once, and only one a person wrote on the CMS.
+ *      A claim is recorded on disk before it is posted (`SentLog`), so even a
+ *      crash and restart cannot send it twice; a reply with no author is refused.
+ *   4. Never a message to someone who has not written to the shop.
+ *      Only replies into an existing conversation in which the customer has
+ *      written (the CMS says so with each claim); never a new conversation.
+ */
+
+const fs = require('fs');
+const path = require('path');
+
 const INBOX_URL = 'https://www.etsy.com/messages?ref=seller-platform-mcnav';
+/** window.name of the agent's own inbox tab: it never uses or moves a tab a person opened. */
+const TAB_MARK = 'dakuho-inbox-agent';
 /** The tab is reloaded after this long, for a fresh csrf nonce and session. */
 const TAB_MAX_AGE_MS = 30 * 60000;
 /** At most this many conversations' messages are read per shop per round. */
-const THREADS_PER_ROUND = 15;
+const THREADS_PER_ROUND = 12;
 /** Older-message calls per conversation per round (6 messages each). */
 const OLDER_CALLS_PER_THREAD = 10;
+/** Etsy calls (reads) per shop per round; the rest waits for the next round. */
+const ETSY_CALLS_PER_SHOP_ROUND = 45;
 /** Etsy's composer allows 3 attachments a message. */
 const MAX_IMAGES = 3;
-/** Pages of "Order help requests" (20 conversations each) read per shop per round. */
+/** Pages of "Order help requests" (20 conversations each) read when it is read. */
 const HELP_LIST_PAGES = 2;
+/** "Order help requests" is read every this many rounds of a shop, not every round. */
+const HELP_LIST_EVERY_ROUNDS = 3;
+/** The signed-in user is checked again after this long (rule 1). */
+const IDENTITY_MAX_AGE_MS = 30 * 60000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-/** A short, uneven pause between Etsy calls, like a person clicking through. */
-const pause = () => sleep(1200 + Math.random() * 1800);
+/**
+ * An uneven pause between Etsy calls, like a person clicking through: 2–6 s,
+ * and now and then (1 in 10) a longer break of 8–20 s.
+ */
+const pause = () => sleep(2000 + Math.random() * 4000 + (Math.random() < 0.1 ? 6000 + Math.random() * 12000 : 0));
+
+/**
+ * Rule 2: the only Etsy endpoints this agent may call. Reading the inbox list,
+ * a thread's messages, uploading an image for a reply and posting a reply to an
+ * existing conversation (a number in the path) — nothing else.
+ */
+const ALLOWED_CALLS = [
+  ['GET', /^\/api\/v3\/ajax\/bespoke\/member\/conversations\/message-list-data\?/],
+  ['GET', /^\/api\/v3\/ajax\/bespoke\/member\/conversations\/detail-view-data\?conversation_id=\d+&/],
+  ['GET', /^\/api\/v3\/ajax\/member\/conversations\/detail\/\d+\/message-list\?offset=\d+&fetch_older=true&/],
+  ['POST', /^\/api\/v3\/ajax\/member\/conversations\/attachment-upload$/],
+  ['POST', /^\/api\/v3\/ajax\/member\/conversations\/\d+$/],
+];
+function assertAllowed(method, url) {
+  if (!ALLOWED_CALLS.some(([m, re]) => m === method && re.test(url))) {
+    throw new Error(`agent chặn lệnh gọi Etsy ngoài danh sách cho phép: ${method} ${url.split('?')[0]}`);
+  }
+}
+
+/**
+ * The inbox list, not a conversation: /messages, /messages/inbox… but never
+ * /messages/<number> (rule 2 — opening a conversation can mark it read).
+ */
+function isInboxList(url) {
+  let pathname;
+  try {
+    ({ pathname } = new URL(url));
+  } catch {
+    return false;
+  }
+  if (pathname !== '/messages' && !pathname.startsWith('/messages/')) return false;
+  return !pathname.split('/').some((part) => /^\d+$/.test(part));
+}
+
+/** Thrown when a shop has used its Etsy calls for this round (rule 1). */
+class BudgetSpent extends Error {}
+
+/**
+ * Rule 3: every claim the agent has started to send, kept on disk. A claim is
+ * written here *before* its POST, so a crash between the two can never lead to
+ * a second POST — the CMS turns the reply "unknown" and a person checks Etsy.
+ * A key is reply id + claim time: a reply a person sends again after checking
+ * is a new claim, with a new time.
+ */
+class SentLog {
+  constructor(dir) {
+    this.file = dir ? path.join(dir, 'inbox-sent.json') : null;
+    this.keys = new Set();
+    try {
+      if (this.file) this.keys = new Set(JSON.parse(fs.readFileSync(this.file, 'utf8')));
+    } catch {
+      // No file yet.
+    }
+  }
+
+  has(key) {
+    return this.keys.has(key);
+  }
+
+  add(key) {
+    this.keys.add(key);
+    if (!this.file) return;
+    // The last 5000 are plenty: an old claim is never handed out again.
+    fs.writeFileSync(this.file, JSON.stringify([...this.keys].slice(-5000)), 'utf8');
+  }
+}
 
 /** Etsy sends message text with <br /> for line breaks and the odd entity. */
 function plainText(html) {
@@ -244,11 +344,33 @@ class InboxApi {
   }
 }
 
+/**
+ * Why a claimed reply must not go out (rules 3 and 4), or null when it may.
+ * Nothing is posted for a refused reply; the CMS shows it as failed.
+ */
+function refuseReason(reply) {
+  const conversationId = Number(reply.conversationId);
+  if (!Number.isSafeInteger(conversationId) || conversationId <= 0) return 'không có hội thoại hợp lệ (agent không mở hội thoại mới)';
+  if (!reply.createdBy) return 'câu trả lời không có người viết trên CMS';
+  if (reply.customerMessaged !== true) return 'khách chưa từng nhắn trong hội thoại này — agent không gửi tin chủ động';
+  if (!String(reply.body || '').trim() && !(reply.images || []).length) return 'câu trả lời trống';
+  return null;
+}
+
 class InboxReader {
-  constructor(log, pool, version) {
+  constructor(log, pool, version, dataDir) {
     this.log = log;
     this.pool = pool;
     this.version = version;
+    /** Rule 3: claims already started, kept across restarts. */
+    this.sentLog = new SentLog(dataDir);
+    /** Rule 1: profileId → { userId, at } of the Etsy user last seen signed in. */
+    this.identity = new Map();
+    /** Rule 1: Etsy calls made in the current job (a round or a quick send). */
+    this.calls = 0;
+    this.callLimit = Infinity;
+    /** shopName → rounds read, for reading "Order help requests" every few rounds. */
+    this.rounds = new Map();
     /** profileId → when its inbox tab was last loaded. */
     this.loadedAt = new Map();
     /** shopName → the job running in its inbox tab (see `exclusive`). */
@@ -271,9 +393,11 @@ class InboxReader {
         const state = await page.evaluate(signInScript()).catch((error) => ({ signedIn: false, reason: error.message }));
         if (!state.signedIn) throw new Error(`profile "${profile.name}" chưa đăng nhập Etsy (${state.reason})`);
 
+        this.calls = 0;
+        this.callLimit = ETSY_CALLS_PER_SHOP_ROUND;
         this.urgent.delete(shopName);
-        let sent = await this.sendReplies(api, page, shopName);
-        const { threads, conversations, sentMidway } = await this.readInbox(api, page, shopName, settings);
+        let sent = await this.sendReplies(api, page, shopName, profileId);
+        const { threads, conversations, sentMidway } = await this.readInbox(api, page, shopName, settings, profileId);
         sent += sentMidway;
         return { sent, threads, conversations };
       }));
@@ -309,9 +433,33 @@ class InboxReader {
         const page = await this.inboxTab(browser, profileId);
         const state = await page.evaluate(signInScript()).catch((error) => ({ signedIn: false, reason: error.message }));
         if (!state.signedIn) throw new Error(`profile "${profile.name}" chưa đăng nhập Etsy (${state.reason})`);
-        return this.sendReplies(api, page, shopName);
+        this.calls = 0;
+        this.callLimit = Infinity; // a send is a handful of calls, all wanted
+        return this.sendReplies(api, page, shopName, profileId);
       }),
     );
+  }
+
+  /**
+   * Rule 1: the Etsy user signed in to this profile, read from the inbox list
+   * (user_data.user_id) at most every IDENTITY_MAX_AGE_MS. The CMS compares it
+   * with the user it knows for the shop and refuses replies on a mismatch.
+   */
+  async signedInUser(page, profileId, fromList) {
+    const known = this.identity.get(profileId);
+    if (fromList) {
+      this.identity.set(profileId, { userId: Number(fromList), at: Date.now() });
+      return Number(fromList);
+    }
+    if (known && Date.now() - known.at < IDENTITY_MAX_AGE_MS) return known.userId;
+    const data = await this.get(
+      page,
+      '/api/v3/ajax/bespoke/member/conversations/message-list-data?tag=system_tag.inbox&page=1&is_search=false&search_query=&load_shop_convos=true',
+    );
+    const userId = Number(data.user_data?.user_id);
+    if (!(userId > 0)) throw new Error('không đọc được tài khoản Etsy đang đăng nhập trong profile');
+    this.identity.set(profileId, { userId, at: Date.now() });
+    return userId;
   }
 
   /** One job at a time in a shop's inbox tab (the round and the quick send share it). */
@@ -327,23 +475,39 @@ class InboxReader {
   }
 
   /**
-   * The shop's inbox tab: the one left open by the last round, or a new one.
-   * Reloaded when old, so the csrf nonce on it stays valid.
+   * Rule 2: the agent's own inbox tab — marked with window.name — or a new one.
+   * A tab a person opened (a conversation, the inbox, anything) is never used,
+   * reloaded or navigated. The agent's tab only ever shows the inbox list, so no
+   * conversation is ever opened. Reloaded when old, for a fresh csrf nonce.
    */
   async inboxTab(browser, profileId) {
-    const pages = await browser.pages();
-    let page = pages.find((p) => p.url().startsWith('https://www.etsy.com/messages'));
+    let page = null;
+    for (const candidate of await browser.pages()) {
+      if (!candidate.url().startsWith('https://www.etsy.com/messages')) continue;
+      const name = await candidate.evaluate(() => window.name).catch(() => '');
+      if (name === TAB_MARK) {
+        page = candidate;
+        break;
+      }
+    }
     const fresh = Date.now() - (this.loadedAt.get(profileId) || 0) < TAB_MAX_AGE_MS;
-    if (page && fresh) return page;
+    if (page && fresh && isInboxList(page.url())) return page;
     if (!page) page = await browser.newPage();
     await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sleep(3000);
+    if (!isInboxList(page.url())) throw new Error(`tab hộp thư không ở trang danh sách (${page.url().split('?')[0]}) — dừng, không làm gì`);
+    await page.evaluate((mark) => {
+      window.name = mark;
+    }, TAB_MARK);
     this.loadedAt.set(profileId, Date.now());
     return page;
   }
 
-  /** Runs in the page: GET Etsy's JSON with the shop's own session. */
-  static async get(page, url) {
+  /** Runs in the page: GET Etsy's JSON with the shop's own session (allow-listed, counted). */
+  async get(page, url) {
+    assertAllowed('GET', url);
+    if (this.calls >= this.callLimit) throw new BudgetSpent(`đã dùng hết ${this.callLimit} lần gọi Etsy của lượt này`);
+    this.calls += 1;
     const result = await page.evaluate(async (target) => {
       const res = await fetch(target, { credentials: 'include', headers: { accept: 'application/json' } });
       return { status: res.status, text: await res.text() };
@@ -352,17 +516,18 @@ class InboxReader {
     return JSON.parse(result.text);
   }
 
-  async readInbox(api, page, shopName, settings) {
+  async readInbox(api, page, shopName, settings, profileId) {
     const maxPages = Math.max(1, Number(settings.inboxMaxPages) || 5);
     let need = [];
     let conversations = 0;
     let shopUserId = null;
     for (let n = 1; n <= maxPages; n += 1) {
-      const data = await InboxReader.get(
+      const data = await this.get(
         page,
         `/api/v3/ajax/bespoke/member/conversations/message-list-data?tag=system_tag.inbox&page=${n}&is_search=false&search_query=&load_shop_convos=true`,
       );
       shopUserId = data.user_data?.user_id || shopUserId;
+      if (n === 1 && shopUserId) await this.signedInUser(page, profileId, shopUserId);
       const rows = (data.conversations || []).map(cardOf);
       conversations += rows.length;
       const answer = await api.post('sync', {
@@ -381,9 +546,13 @@ class InboxReader {
     // "Order help requests" too, a page or two each round: that is where Etsy keeps the
     // Refunded / Help request conversations, often months old and long off the first
     // inbox page — so their labels stay current on the CMS.
-    for (let n = 1; n <= HELP_LIST_PAGES; n += 1) {
+    // Every HELP_LIST_EVERY_ROUNDS rounds of the shop, not every round (rule 1: fewer calls).
+    const round = (this.rounds.get(shopName) || 0) + 1;
+    this.rounds.set(shopName, round);
+    const helpPages = round % HELP_LIST_EVERY_ROUNDS === 1 ? HELP_LIST_PAGES : 0;
+    for (let n = 1; n <= helpPages; n += 1) {
       await pause();
-      const data = await InboxReader.get(
+      const data = await this.get(
         page,
         `/api/v3/ajax/bespoke/member/conversations/message-list-data?tag=system_tag.order_help_requests&page=${n}&is_search=false&search_query=&load_shop_convos=true`,
       ).catch((error) => {
@@ -417,6 +586,8 @@ class InboxReader {
         await this.readThread(api, page, shopName, item.conversationId, item.syncedOrder || 0, item.oldestOrder || null);
         threads += 1;
       } catch (error) {
+        // Rule 1: the shop's calls for this round are spent; the rest comes next round.
+        if (error instanceof BudgetSpent) break;
         this.log(`${shopName}: đọc hội thoại ${item.conversationId} lỗi — ${error.message}`);
       }
     }
@@ -431,7 +602,7 @@ class InboxReader {
    * has (oldestOrder). With `newestOnly` just the newest few (right after a send).
    */
   async readThread(api, page, shopName, conversationId, syncedOrder, oldestOrder, { newestOnly = false } = {}) {
-    const data = await InboxReader.get(
+    const data = await this.get(
       page,
       `/api/v3/ajax/bespoke/member/conversations/detail-view-data?conversation_id=${conversationId}&load_shop_convos=true`,
     );
@@ -459,7 +630,7 @@ class InboxReader {
     /** One older-messages call ending at `offset`; returns the new lowest order, or null at the start. */
     const readBefore = async (offset) => {
       await pause();
-      const older = await InboxReader.get(
+      const older = await this.get(
         page,
         `/api/v3/ajax/member/conversations/detail/${conversationId}/message-list?offset=${offset}&fetch_older=true&load_shop_convos=true`,
       );
@@ -518,14 +689,36 @@ class InboxReader {
    * failed (Etsy refused, nothing went out), anything else unknown. The thread
    * is read again right after, so the CMS sees the message and ties it to the
    * reply.
+   *
+   * Before anything is posted (rules 1, 3 and 4): the Etsy user signed in here
+   * must be the shop's own — the CMS checks it and hands out nothing otherwise;
+   * the reply must have been written by a person on the CMS, into a conversation
+   * in which the customer has written; and its claim must not have been started
+   * before — it is recorded on disk first, so it is never posted twice.
    */
-  async sendReplies(api, page, shopName) {
-    const { replies = [] } = await api.post('replies/claim', { shopName });
+  async sendReplies(api, page, shopName, profileId) {
+    const shopUserId = await this.signedInUser(page, profileId);
+    const { replies = [] } = await api.post('replies/claim', { shopName, shopUserId });
     let sent = 0;
     for (const reply of replies) {
       let outcome = 'unknown';
       let error = null;
       let imageIds = [];
+      const refused = refuseReason(reply);
+      const key = `${reply.id}@${reply.claimedAt || ''}`;
+      if (refused) {
+        await api.post(`replies/${reply.id}/result`, { outcome: 'failed', error: `agent không gửi: ${refused}` }).catch(() => {});
+        this.log(`${shopName}: không gửi câu trả lời #${reply.id} — ${refused}`);
+        continue;
+      }
+      if (this.sentLog.has(key)) {
+        // Started before (a crash, a restart): never posted a second time.
+        await api
+          .post(`replies/${reply.id}/result`, { outcome: 'unknown', error: 'agent đã bắt đầu gửi câu này trước đó — không gửi lại; xem trên Etsy đã có tin chưa' })
+          .catch(() => {});
+        continue;
+      }
+      this.sentLog.add(key);
       try {
         // Images first: until the message itself is posted nothing has reached
         // the customer, so a failed upload is a plain "failed".
@@ -535,6 +728,7 @@ class InboxReader {
         error = `không đưa được ảnh lên Etsy, tin chưa gửi: ${e.message}`;
       }
       if (outcome !== 'failed') try {
+        assertAllowed('POST', `/api/v3/ajax/member/conversations/${reply.conversationId}`);
         const result = await page.evaluate(
           async ({ conversationId, body, attachments }) => {
             const csrf = document.querySelector('meta[name="csrf_nonce"]')?.content;
@@ -602,6 +796,7 @@ class InboxReader {
       const type = (res.headers.get('content-type') || 'image/png').split(';')[0];
       const buffer = Buffer.from(await res.arrayBuffer());
       const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      assertAllowed('POST', '/api/v3/ajax/member/conversations/attachment-upload');
       const result = await page.evaluate(
         async ({ base64, type, name }) => {
           const csrf = document.querySelector('meta[name="csrf_nonce"]')?.content;

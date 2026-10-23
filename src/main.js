@@ -509,7 +509,8 @@ async function runInboxRound(reason) {
     let sent = 0;
     let threads = 0;
     const failed = [];
-    for (const shop of rows) {
+    // A different order each round, not the same shop first every five minutes.
+    for (const shop of shuffled(rows)) {
       if (!shop.profileId) {
         failed.push(`${shop.shopName} (chưa chọn profile)`);
         continue;
@@ -605,11 +606,22 @@ function startReplyTimer() {
   setTimeout(tick, 20000);
 }
 
-/** Every `inboxIntervalMinutes`, counted from the end of the last round. */
+/** A shuffled copy (Fisher–Yates). */
+function shuffled(list) {
+  const out = [...list];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const k = Math.floor(Math.random() * (i + 1));
+    [out[i], out[k]] = [out[k], out[i]];
+  }
+  return out;
+}
+
+/** Every `inboxIntervalMinutes` (± a little), counted from the end of the last round. */
 function startInboxTimer() {
   const next = () => {
     const minutes = Math.max(2, Number(config.load(app).inboxIntervalMinutes) || 5);
-    setTimeout(tick, minutes * 60000);
+    // Uneven, like a person checking in now and then: 80–140 % of the set interval.
+    setTimeout(tick, minutes * 60000 * (0.8 + Math.random() * 0.6));
   };
   const tick = async () => {
     try {
@@ -899,7 +911,7 @@ if (!app.requestSingleInstanceLock()) {
     const pool = new ProfilePool(log);
     etsy = new EtsyReader(log, pool);
     csv = new CsvDownloader(log, pool);
-    inbox = new InboxReader(log, pool, app.getVersion());
+    inbox = new InboxReader(log, pool, app.getVersion(), app.getPath('userData'));
     startCsvTimer();
     startInboxTimer();
     startLastMileTimer();
