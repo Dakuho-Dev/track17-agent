@@ -47,6 +47,8 @@ const THREADS_PER_ROUND = 15;
 const OLDER_CALLS_PER_THREAD = 10;
 /** Etsy's composer allows 3 attachments a message. */
 const MAX_IMAGES = 3;
+/** Pages of "Order help requests" (20 conversations each) read per shop per round. */
+const HELP_LIST_PAGES = 2;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** A short, uneven pause between Etsy calls, like a person clicking through. */
 const pause = () => sleep(1200 + Math.random() * 1800);
@@ -166,6 +168,29 @@ function pick(obj, ...keys) {
   if (!obj || typeof obj !== 'object') return undefined;
   for (const key of keys) if (obj[key] !== undefined && obj[key] !== null) return obj[key];
   return undefined;
+}
+
+/** One conversation of an inbox list, as the CMS takes it. */
+function cardOf(c) {
+  return {
+    conversationId: c.conversation_id,
+    title: c.title,
+    excerpt: plainText(c.excerpt),
+    isUnread: c.is_unread,
+    hasReplied: c.has_replied,
+    messageCount: c.message_count,
+    isOrderHelp: c.is_order_help_request,
+    // Etsy's "Refunded" label on the list (read from its code 2026-10-23: card.orderHasRefund).
+    hasRefund: Boolean(c.order_has_refund ?? c.orderHasRefund),
+    isCustomOrder: c.is_custom_order,
+    isEtsyNotification: c.is_etsy_notification,
+    otherUser: c.other_user && {
+      userId: c.other_user.user_id,
+      displayName: c.other_user.display_name,
+      username: c.other_user.username,
+      avatarUrl: c.other_user.avatar_url,
+    },
+  };
 }
 
 function toMessage(m) {
@@ -338,23 +363,7 @@ class InboxReader {
         `/api/v3/ajax/bespoke/member/conversations/message-list-data?tag=system_tag.inbox&page=${n}&is_search=false&search_query=&load_shop_convos=true`,
       );
       shopUserId = data.user_data?.user_id || shopUserId;
-      const rows = (data.conversations || []).map((c) => ({
-        conversationId: c.conversation_id,
-        title: c.title,
-        excerpt: plainText(c.excerpt),
-        isUnread: c.is_unread,
-        hasReplied: c.has_replied,
-        messageCount: c.message_count,
-        isOrderHelp: c.is_order_help_request,
-        isCustomOrder: c.is_custom_order,
-        isEtsyNotification: c.is_etsy_notification,
-        otherUser: c.other_user && {
-          userId: c.other_user.user_id,
-          displayName: c.other_user.display_name,
-          username: c.other_user.username,
-          avatarUrl: c.other_user.avatar_url,
-        },
-      }));
+      const rows = (data.conversations || []).map(cardOf);
       conversations += rows.length;
       const answer = await api.post('sync', {
         shopName,
@@ -367,6 +376,27 @@ class InboxReader {
       need = need.concat(answer.need || []);
       if (!answer.morePages || n >= (data.pagination?.total_pages || 1)) break;
       await pause();
+    }
+
+    // "Order help requests" too, a page or two each round: that is where Etsy keeps the
+    // Refunded / Help request conversations, often months old and long off the first
+    // inbox page — so their labels stay current on the CMS.
+    for (let n = 1; n <= HELP_LIST_PAGES; n += 1) {
+      await pause();
+      const data = await InboxReader.get(
+        page,
+        `/api/v3/ajax/bespoke/member/conversations/message-list-data?tag=system_tag.order_help_requests&page=${n}&is_search=false&search_query=&load_shop_convos=true`,
+      ).catch((error) => {
+        this.log(`${shopName}: đọc danh sách Order help requests lỗi — ${error.message}`);
+        return null;
+      });
+      if (!data) break;
+      const rows = (data.conversations || []).map(cardOf);
+      if (!rows.length) break;
+      const answer = await api.post('sync', { shopName, agentVersion: this.version, list: 'order_help', page: n, conversations: rows });
+      const known = new Set(need.map((item) => Number(item.conversationId)));
+      need = need.concat((answer.need || []).filter((item) => !known.has(Number(item.conversationId))));
+      if (n >= (data.pagination?.total_pages || 1)) break;
     }
 
     let threads = 0;
