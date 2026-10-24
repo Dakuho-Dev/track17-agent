@@ -16,9 +16,8 @@ const { signInScript } = require('./etsy');
  *     https://www.etsy.com/your/shops/me/download
  *
  * once per chosen type: pick the CSV type, pick the CURRENT month and year,
- * press "Download CSV". Each type runs in a tab of its own inside the shop's
- * profile, all at once, alongside whatever the status reader is doing in
- * another tab.
+ * press "Download CSV". The types go one after another in one tab of the
+ * shop's profile, alongside whatever the status reader is doing in another.
  *
  * The form is driven by its field ids (#filter-csv-type, #filter-month,
  * #filter-year), the same ones the old Chrome extension used; options are
@@ -151,6 +150,12 @@ function orderButtonScript() {
 /** How long to wait after the click for Etsy's notice (or, rarely, a file). */
 const CLICK_WAIT_MS = 30000;
 
+/** Pause between two CSV types of the same shop (plus up to 10 s of jitter). */
+const BETWEEN_TYPES_MS = 20000;
+
+/** The request the Orders form sends on "Download CSV" (GET /your/orders/sold.csv). */
+const EXPORT_URL = /\/your\/orders\/sold\.csv/i;
+
 /** Runs in the page: Etsy's "we're generating your download" notice, if shown. */
 function generatingNoticeScript() {
   const match = (document.body.innerText || '').match(/We['’]re generating your download[^\n]*/i);
@@ -183,14 +188,18 @@ class CsvDownloader {
 
   /**
    * Request every chosen CSV type for one shop, current month, in one visit to
-   * its profile. Returns `{ results: [{ csvType, requested?, file?, error? }] }`,
+   * its profile. Returns `{ results: [{ csvType, requested?, file?, error?, clicked? }] }`,
    * or `{ needsLogin }` when the profile is not signed in to Etsy.
    *
-   * Each type gets a tab of its own and the tabs run side by side, so a shop
-   * takes about as long as its slowest type rather than the sum of them. The
-   * tabs start a moment apart, as a person opening them one after another
-   * would. A type that fails does not stop the others: its error is logged
-   * and kept in its result.
+   * The types go one after another in a single tab, with a pause between
+   * them. They used to run in parallel tabs a second or two apart, and some
+   * shops then got only one of their two emails (or none) although every tab
+   * had read Etsy's "we're generating your download" notice: the notice is
+   * shared by the whole session, so a tab can read the one meant for its
+   * neighbour, and Etsy does not seem to take two exports from one shop at
+   * the same instant. A type that fails does not stop the next: its error is
+   * logged and kept in its result, with `clicked` saying whether the button
+   * was pressed (only an unpressed type is safe to try again).
    */
   async downloadShop(shopName, { settings, profileId, csvTypes }) {
     const types = Array.isArray(csvTypes) ? csvTypes : parseCsvTypes(csvTypes);
@@ -199,37 +208,35 @@ class CsvDownloader {
 
     return this.pool.use(settings, profileId, async (browser, profile) => {
       // Browser-wide setting: catch downloads into our folder under their guid,
-      // then rename. Set once for all tabs, and put back to the profile's normal
-      // behaviour when every tab is done, so the operator's own downloads go
-      // where they always do.
+      // then rename. Put back to the profile's normal behaviour when done, so
+      // the operator's own downloads go where they always do.
       const cdp = await browser.target().createCDPSession();
-      const pages = [];
+      let page = null;
       try {
         await cdp.send('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: dir, eventsEnabled: true });
-        const results = await Promise.all(
-          types.map(async (csvType, index) => {
-            if (index > 0) await sleep(index * (1000 + Math.random() * 1500));
-            try {
-              const page = await browser.newPage();
-              pages.push(page);
-              return { csvType, ...(await this.requestOne(page, cdp, { shopName, profile, csvType, dir })) };
-            } catch (error) {
-              this.log(`${shopName}: tải CSV ${csvType} lỗi — ${error.message}`);
-              return { csvType, error: error.message };
-            }
-          }),
-        );
-        if (results.some((one) => one.needsLogin)) return { needsLogin: true };
+        page = await browser.newPage();
+        const results = [];
+        for (const [index, csvType] of types.entries()) {
+          if (index > 0) await sleep(BETWEEN_TYPES_MS + Math.random() * 10000);
+          try {
+            const one = await this.requestOne(page, cdp, { shopName, profile, csvType, dir });
+            if (one.needsLogin) return { needsLogin: true };
+            results.push({ csvType, ...one });
+          } catch (error) {
+            this.log(`${shopName}: tải CSV ${csvType} lỗi — ${error.message}`);
+            results.push({ csvType, error: error.message, clicked: Boolean(error.clicked) });
+          }
+        }
         return { results };
       } finally {
         await cdp.send('Browser.setDownloadBehavior', { behavior: 'default' }).catch(() => {});
         await cdp.detach().catch(() => {});
-        await Promise.all(pages.map((page) => page.close().catch(() => {})));
+        if (page) await page.close().catch(() => {});
       }
     });
   }
 
-  /** One CSV type in its own tab: load the download page, fill the form, click, read the outcome. */
+  /** One CSV type: load the download page, fill the form, click, read the outcome. */
   async requestOne(page, cdp, { shopName, profile, csvType, dir }) {
     const { month, year } = vietnamNow();
     await page.goto(DOWNLOAD_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -243,6 +250,10 @@ class CsvDownloader {
     // Let Etsy's own script settle before touching the form, as a person would.
     await sleep(1500 + Math.random() * 1500);
 
+    // A notice already on the page before the click belongs to an earlier
+    // request, so it cannot be taken as this one's answer.
+    const staleNotice = await page.evaluate(generatingNoticeScript).catch(() => null);
+
     const chosen = await page.evaluate(fillFormScript, csvType, month, year);
     if (chosen.error) throw new Error(chosen.error);
     await sleep(800 + Math.random() * 700);
@@ -250,24 +261,37 @@ class CsvDownloader {
     const button = await page.evaluateHandle(orderButtonScript);
     if (!button.asElement()) throw new Error('không thấy nút "Download CSV" của mục Orders');
 
-    // What the page asks for after the click — the evidence when no file comes.
+    // What the page asks for after the click — the evidence when no file comes,
+    // and, for the export request itself, the proof that Etsy got it.
     const requests = [];
+    let exportRequest = null;
     const onRequest = (request) => {
       if (requests.length < 15) requests.push(`${request.method()} ${request.url().slice(0, 140)}`);
     };
+    const onResponse = (response) => {
+      if (!exportRequest && EXPORT_URL.test(response.url())) {
+        exportRequest = { url: response.url(), status: response.status() };
+      }
+    };
     page.on('request', onRequest);
+    page.on('response', onResponse);
 
-    // Several tabs may be downloading at once: only take the file this tab started.
     const download = waitForDownload(cdp, CLICK_WAIT_MS, page.mainFrame()._id).catch(() => null);
-    await button.asElement().click();
-    // The usual outcome: the page reloads with Etsy's "we'll email you" notice.
-    await page.waitForNavigation({ timeout: CLICK_WAIT_MS }).catch(() => {});
-    await sleep(1500);
-    page.off('request', onRequest);
+    try {
+      await button.asElement().click();
+      // The usual outcome: the page reloads with Etsy's "we'll email you" notice.
+      await page.waitForNavigation({ timeout: CLICK_WAIT_MS }).catch(() => {});
+      await sleep(1500);
+    } finally {
+      page.off('request', onRequest);
+      page.off('response', onResponse);
+    }
 
     const notice = await page.evaluate(generatingNoticeScript).catch(() => null);
-    if (notice) {
-      this.log(`${shopName}: đã yêu cầu ${chosen.type.text} tháng ${month}/${year} — Etsy: "${notice}"`);
+    const accepted = exportRequest && exportRequest.status < 400;
+    if (notice && (accepted || !staleNotice)) {
+      const sent = exportRequest ? ` (${exportRequest.status} ${exportRequest.url.slice(0, 160)})` : '';
+      this.log(`${shopName}: đã yêu cầu ${chosen.type.text} tháng ${month}/${year} — Etsy: "${notice}"${sent}`);
       return { requested: true, notice };
     }
 
@@ -283,10 +307,13 @@ class CsvDownloader {
 
     // Neither the notice nor a file: say what the page did, and do not
     // click again — each click is another export and another email.
-    throw new Error(
-      `bấm Download CSV nhưng Etsy không báo đang tạo file, cũng không trả file. Trang: ${page.url()}. ` +
-        `Request sau khi bấm: ${requests.join(' | ') || 'không có'}`,
+    const error = new Error(
+      `bấm Download CSV nhưng Etsy không báo đang tạo file, cũng không trả file` +
+        (staleNotice ? ' (thông báo trên trang có từ trước khi bấm)' : '') +
+        `. Trang: ${page.url()}. Request sau khi bấm: ${requests.join(' | ') || 'không có'}`,
     );
+    error.clicked = true;
+    throw error;
   }
 }
 

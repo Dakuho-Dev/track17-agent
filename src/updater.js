@@ -7,37 +7,33 @@ const { app } = require('electron');
  *
  * The agent is meant to sit on a box nobody logs into, so "update" cannot mean
  * "someone downloads an installer". It means: notice a new GitHub Release,
- * fetch it, and restart into it — on its own.
+ * fetch it, and restart into it — on its own, in one go.
  *
- * Two things make that safe rather than merely automatic:
+ * It used to hold a downloaded update until the agent went idle. With the
+ * tracking passes, the CSV timer and the inbox each on their own clock, "idle"
+ * could take hours to come round, so a fix sat on disk while the box ran the
+ * old code. Now a downloaded update is installed straight away. What that
+ * costs is small: a 17track batch cut short is under a ten-minute lease and
+ * WrL hands it out again, and every other job picks up on its next round.
  *
- *   It never restarts mid-pass. A 17track batch is claimed from WrL under a
- *   ten-minute lease and an Etsy walk takes minutes per shop; quitting in the
- *   middle would drop the answers and leave the numbers to time out. So a
- *   downloaded update waits for the loop to go idle, however long that takes.
- *
- *   It never blocks the work. Every failure here — no network, a malformed
- *   release, GitHub down — is logged and dropped. An agent that cannot update
- *   must still track parcels.
+ * It never blocks the work. Every failure here — no network, a malformed
+ * release, GitHub down — is logged and dropped. An agent that cannot update
+ * must still track parcels.
  *
  * Only a packaged build updates. Run from source, electron-updater has no
  * app-update.yml to read and throws, so that case is reported and skipped.
  */
 
-/** Long enough to be polite to GitHub, short enough that a fix lands the same day. */
-const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
-
-/** How often to re-ask "are you idle yet?" once an update is sitting ready. */
-const IDLE_POLL_MS = 60 * 1000;
+/** Short enough that a release lands within the hour, long enough to be polite to GitHub. */
+const CHECK_EVERY_MS = 30 * 60 * 1000;
 
 let started = false;
 
 /**
  * @param {object} options
  * @param {(message: string) => void} options.log
- * @param {() => boolean} options.isBusy  true while a tracking pass is running
  */
-function start({ log, isBusy }) {
+function start({ log }) {
   if (started) return;
   started = true;
 
@@ -64,9 +60,11 @@ function start({ log, isBusy }) {
   };
 
   autoUpdater.autoDownload = true;
-  // The backstop: if the operator ever closes the app by hand before the idle
-  // window arrives, the update is applied on the way out.
+  // The backstop: if the app is closed by hand between download and install,
+  // the update is applied on the way out.
   autoUpdater.autoInstallOnAppQuit = true;
+
+  let installing = false;
 
   autoUpdater.on('update-available', (info) => {
     log('Có bản mới ' + info.version + ' — đang tải về.');
@@ -81,11 +79,19 @@ function start({ log, isBusy }) {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    log('Đã tải xong bản ' + info.version + ' — sẽ cài khi agent rảnh.');
-    installWhenIdle(autoUpdater, { log, isBusy, version: info.version });
+    if (installing) return;
+    installing = true;
+    log('Đã tải xong bản ' + info.version + ' — cài ngay và khởi động lại.');
+    // Give the log line a moment to reach the file and the window.
+    setTimeout(() => {
+      // (isSilent, isForceRunAfter): no installer UI on a headless box, and come
+      // back up afterwards rather than leaving the machine with nothing running.
+      autoUpdater.quitAndInstall(true, true);
+    }, 3000);
   });
 
   const check = () => {
+    if (installing) return;
     autoUpdater.checkForUpdates().catch((error) => {
       log('Không kiểm tra được bản cập nhật: ' + error.message);
     });
@@ -95,26 +101,6 @@ function start({ log, isBusy }) {
   // created, and a message logged before it exists only reaches the file.
   setTimeout(check, 10 * 1000);
   setInterval(check, CHECK_EVERY_MS);
-}
-
-/**
- * Restart into the new version at the first moment nothing is in flight.
- *
- * Deliberately has no deadline. A forced restart would cost a batch of answers,
- * and the agent idles between passes anyway, so waiting always wins.
- */
-function installWhenIdle(autoUpdater, { log, isBusy, version }) {
-  const attempt = () => {
-    if (isBusy()) return;
-    clearInterval(timer);
-    log('Agent đang rảnh — cài bản ' + version + ' và khởi động lại.');
-    // (isSilent, isForceRunAfter): no installer UI on a headless box, and come
-    // back up afterwards rather than leaving the machine with nothing running.
-    autoUpdater.quitAndInstall(true, true);
-  };
-
-  const timer = setInterval(attempt, IDLE_POLL_MS);
-  attempt();
 }
 
 module.exports = { start, CHECK_EVERY_MS };

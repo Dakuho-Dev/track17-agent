@@ -81,7 +81,9 @@ Việc thứ ba, chạy song song với hai làn tra vận đơn. Loại CSV và
 **Tải Etsy CSV** trên CMS (ô "Tự tải theo giờ", VD `08:00, 14:30, 20:00`, giờ Việt Nam).
 Đến giờ, với mỗi shop đã có profile Hidemyacc, agent:
 
-1. mở profile qua Hidemyacc, mở một tab riêng tới `etsy.com/your/shops/me/download`;
+1. mở profile qua Hidemyacc, mở một tab riêng tới `etsy.com/your/shops/me/download`
+   (nhiều loại CSV thì làm lần lượt trong tab đó, nghỉ 20–30 giây giữa hai loại; loại nào
+   chưa kịp bấm nút vì lỗi mở profile/trang thì được thử lại một lần cuối lượt);
 2. chọn loại CSV theo CMS, chọn **tháng và năm hiện tại** (không dùng ô tháng/năm của CMS);
 3. bấm nút **Download CSV** của mục Orders;
 4. bắt file qua DevTools, lưu vào `<Thư mục lưu CSV>/<shop>/<shop> - <tên file Etsy>.csv`.
@@ -164,13 +166,13 @@ Từ đó máy không cần ai đăng nhập nữa.
 ## Tự cập nhật
 
 Agent tự kiểm tra bản mới trên GitHub Releases: lần đầu sau 10 giây kể từ lúc mở,
-rồi mỗi 6 tiếng. Thấy bản mới thì tải về ngầm.
+rồi mỗi 30 phút. Thấy bản mới thì tải về, **tải xong là cài ngay** rồi tự khởi động
+lại — không đợi agent rảnh nữa (trước 1.6.4 có đợi, nên bản mới có khi nằm chờ cả buổi).
 
-Điều đáng chú ý là lúc cài: **không bao giờ cài giữa lượt đang chạy.** Một lượt
-17track đang giữ 40 mã theo lease 10 phút của WrL, còn một lượt Etsy mất vài phút
-mỗi shop — khởi động lại giữa lúc đó là mất kết quả và để mã treo đến khi hết lease.
-Nên bản đã tải về đợi đến khi agent rảnh mới cài, đợi bao lâu cũng được, rồi khởi
-động lại và tự chạy tiếp. Mọi bước đều ghi vào `agent.log`.
+Cài giữa lượt thì lượt đó bị cắt: mã 17track đang giữ sẽ được WrL giao lại khi hết
+lease 10 phút, các việc khác chạy tiếp ở vòng sau. Riêng lượt tải CSV bị cắt thì khung
+giờ đó đã tính là chạy rồi — shop nào chưa kịp bấm thì bấm **Tải CSV ngay** cho đủ.
+Mọi bước đều ghi vào `agent.log`.
 
 Bản chạy bằng `npm start` thì không tự cập nhật (không có `app-update.yml`), và app
 nói rõ điều đó trong log.

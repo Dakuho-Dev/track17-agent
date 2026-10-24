@@ -400,25 +400,47 @@ async function runCsvRound(reason) {
     const total = rows.filter((shop) => shop.profileId).length * csvTypes.length;
     let saved = 0;
     let requested = 0;
+    // Types that never reached the button (profile would not open, page did
+    // not load…) get one more go at the end of the round. A type whose button
+    // was pressed is never tried again: that would be a second export and email.
+    const retry = [];
+    const fetchShop = async (shop, types) => {
+      try {
+        const result = await csv.downloadShop(shop.shopName, { settings, profileId: shop.profileId, csvTypes: types });
+        if (result.needsLogin) {
+          stats.errors += 1;
+          pushState();
+          log(`${shop.shopName}: không tải CSV được — profile chưa đăng nhập Etsy.`);
+          return [];
+        }
+        const results = result.results || [];
+        const failed = results.filter((one) => one.error).length;
+        saved += results.filter((one) => one.file).length;
+        requested += results.filter((one) => one.requested).length;
+        if (failed) {
+          stats.errors += failed;
+          pushState();
+        }
+        return results.filter((one) => one.error && !one.clicked).map((one) => one.csvType);
+      } catch (error) {
+        stats.errors += 1;
+        pushState();
+        log(`${shop.shopName}: tải CSV lỗi — ${error.message}`);
+        return types;
+      }
+    };
     for (const shop of rows) {
       if (!shop.profileId) {
         log(`${shop.shopName}: chưa chọn profile Hidemyacc — bỏ qua tải CSV.`);
         continue;
       }
-      try {
-        const result = await csv.downloadShop(shop.shopName, { settings, profileId: shop.profileId, csvTypes });
-        const failed = (result.results || []).filter((one) => one.error).length;
-        saved += (result.results || []).filter((one) => one.file).length;
-        requested += (result.results || []).filter((one) => one.requested).length;
-        if (failed) {
-          stats.errors += failed;
-          pushState();
-        }
-      } catch (error) {
-        stats.errors += 1;
-        pushState();
-        log(`${shop.shopName}: tải CSV lỗi — ${error.message}`);
-      }
+      const left = await fetchShop(shop, csvTypes);
+      if (left.length) retry.push({ shop, types: left });
+    }
+    for (const { shop, types } of retry) {
+      log(`${shop.shopName}: thử lại tải CSV ${types.join(' + ')} (lượt đầu chưa bấm được nút).`);
+      const left = await fetchShop(shop, types);
+      if (left.length) log(`${shop.shopName}: vẫn chưa tải được CSV ${left.join(' + ')} — xem lỗi ở trên.`);
     }
     const summary =
       `${requested}/${total} lượt (shop × loại CSV) đã gửi yêu cầu (Etsy sẽ email link tải)` +
@@ -920,7 +942,7 @@ if (!app.requestSingleInstanceLock()) {
     // Watch for new releases and restart into them when nothing is in flight.
     // `running` is the whole definition of busy: while it is true a batch is
     // claimed from WrL or a shop's order pages are half-read.
-    updater.start({ log, isBusy: () => running || csvRunning || inboxRunning || replyRunning || lastMileRunning });
+    updater.start({ log });
 
     // Nobody is at the keyboard of a machine left running, so the app has to
     // start working by itself after a reboot, a crash restart, or the restart
